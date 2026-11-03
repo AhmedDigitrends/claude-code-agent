@@ -1,0 +1,10 @@
+{
+  "name": "jira-dev-harness",
+  "displayName": "Jira Dev Harness",
+  "version": "0.7.0",
+  "description": "Project-independent harness that takes an assigned Jira Cloud ticket through analysis, planning, approved and attended implementation, independent review, review approval, and commit, push, and pull request creation in the currently opened git repository, in any language or framework.",
+  "author": {
+    "name": "jira-dev-harness maintainers"
+  },
+  "keywords": ["jira", "workflow", "planning", "approval", "code-review", "pull-request", "github"]
+}
