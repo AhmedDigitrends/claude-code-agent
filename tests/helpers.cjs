@@ -24,11 +24,13 @@ function git(cwd, ...args) {
 
 const DEFAULT_MAPPING = { jira: { site: SITE, projectKeys: ["ABC"] } };
 
-function makeFixture(mapping = DEFAULT_MAPPING) {
+// `options.repoDir` places the repository at <base>/<repoDir> (it may contain
+// spaces and sub-directories); the default is <base>/repo.
+function makeFixture(mapping = DEFAULT_MAPPING, options = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "jdh-test-"));
   const tmp = path.join(base, "tmp");
   const data = path.join(base, "plugins", "data", "jira-dev-harness");
-  const repo = path.join(base, "repo");
+  const repo = path.join(base, options.repoDir || "repo");
   const bare = path.join(base, "origin.git");
   for (const d of [tmp, data, repo]) fs.mkdirSync(d, { recursive: true });
   const env = { ...process.env, TEMP: tmp, TMP: tmp, TMPDIR: tmp, CLAUDE_PLUGIN_DATA: data };
@@ -75,15 +77,45 @@ const reviewJson = (verdict) => JSON.stringify({
   changedFiles: [{ path: "src/app.js", assessment: "ok" }],
 });
 
+// Records an in-place implementing session exactly as plugin versions before
+// Phase 8C did (no worktree), after checking that the plan approval is valid.
+// Such sessions keep their review and shipping path, which is what the
+// review, ship, and merge suites exercise until those steps move to the
+// worktree. They never authorize new Developer writes (see worktree tests).
+function legacyImplement(f, name, key, rev, hash) {
+  const L = require(path.join(ROOT, "scripts", "lib", "approval.cjs"));
+  const { t, s, repo } = L.verifyApproved(f.data, key, f.repo);
+  assert.equal(s.n, rev);
+  assert.equal(s.actualHash, hash);
+  const sessionId = f.sid(name);
+  const state = {
+    sessionId,
+    mode: "implementing",
+    startedAt: new Date().toISOString(),
+    authorizedAt: new Date().toISOString(),
+    issueKey: t.key,
+    site: t.site,
+    revision: rev,
+    sha256: hash,
+    planFile: s.planFile.replace(/\\/g, "/"),
+    repo,
+    baseline: { head: git(repo.root, "rev-parse", "HEAD"), status: L.gitStatus(repo.root) },
+  };
+  fs.mkdirSync(path.join(f.data, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(f.data, "sessions", `${sessionId}.json`), JSON.stringify(state, null, 2) + "\n");
+  return state;
+}
+
 // Builds the state after a review has been saved: plan approved, implemented
-// (a real change to src/app.js), reported, checked, and reviewed.
+// in place through a legacy session (a real change to src/app.js), reported,
+// checked, and reviewed.
 function reviewed(verdict = "PASS", mapping) {
   const f = makeFixture(mapping);
   const plan = `# Plan ${KEY}\n\nReadiness: READY\n\n## Files likely to change\n- \`src/app.js\`\n\n## Testing and validation\n- \`node -v\`\n`;
   f.run(["save", f.data, SITE, KEY, draft(f, "plan", plan)]);
   const planHash = /SHA-256: ([0-9a-f]{64})/.exec(f.run(["status", f.data, KEY]).out)[1];
   assert.match(f.run(["approve", f.data, f.sid("plan"), KEY, "r1", planHash]).out, /APPROVAL: GRANTED/);
-  assert.match(f.run(["implement-start", f.data, f.sid("impl"), KEY, "r1", planHash]).out, /AUTHORIZED/);
+  legacyImplement(f, "impl", KEY, 1, planHash);
   fs.writeFileSync(path.join(f.repo, "src", "app.js"), "module.exports = 2;\n");
   assert.match(f.run(["report-save", f.data, f.sid("impl"), draft(f, "report", `Report for ${KEY}\n`)]).out, /REPORT SAVED/);
   assert.match(f.run(["review-start", f.data, f.sid("review"), KEY]).out, /REVIEW: STARTED/);
@@ -103,4 +135,4 @@ function guard(f, input) {
   return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput : { permissionDecision: "(none)", permissionDecisionReason: "" };
 }
 
-module.exports = { ROOT, STORE, GUARD, SITE, KEY, uuid, git, makeFixture, draft, reviewJson, reviewed, guard };
+module.exports = { ROOT, STORE, GUARD, SITE, KEY, uuid, git, makeFixture, draft, reviewJson, legacyImplement, reviewed, guard };

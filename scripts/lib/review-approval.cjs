@@ -2,8 +2,10 @@
 //
 // A review is signed when it is saved (review-save). Approving it records a
 // second signed record, review-approval-<id>.json, bound to the repository,
-// ticket, approved plan, implementation report, exact review bytes, exact
-// HTML report, current git tree, and the content of every changed file.
+// the reviewed workspace (the ticket worktree and its signed binding, or the
+// main checkout for a legacy in-place review), ticket, approved plan,
+// implementation report, exact review bytes, exact HTML report, current git
+// tree, and the content of every changed file.
 // Shipping re-runs every check here before each git or pull request step.
 
 "use strict";
@@ -115,7 +117,10 @@ function reviewArtifactProblems(dataDir, t, id) {
 // StoreError listing the reasons when anything is wrong.
 //   requireRecord: the developer's approval record must exist and be valid
 //   checkTree:     the working tree must still be exactly what was approved
-function verifyReview(dataDir, ref, id, cwd, { requireRecord, checkTree }) {
+//   allowRemovedWorkspace: accept a ticket worktree that was removed with a
+//                  valid signed removal record (only without checkTree; for
+//                  merge verification, which checks the removal itself)
+function verifyReview(dataDir, ref, id, cwd, { requireRecord, checkTree, allowRemovedWorkspace = false }) {
   if (!REVIEW_ID_RE.test(id || "")) fail(`invalid review id "${id}"; expected rv-<number>`);
   const { t, s, repo } = L.verifyApproved(dataDir, ref, cwd);
   const problems = [];
@@ -135,6 +140,21 @@ function verifyReview(dataDir, ref, id, cwd, { requireRecord, checkTree }) {
     else if (report.id !== ident.implementationReport) problems.push("a newer implementation report exists");
     else if (ident.implementationReportSha256 !== report.meta.reportSha256) problems.push("the implementation report differs from the one reviewed");
     if (!L.sameRepo(ident.repo, repo)) problems.push("this is not the reviewed repository");
+  }
+
+  // Phase 8C: the reviewed workspace (ticket worktree, or main checkout for a
+  // legacy in-place review), re-verified through the ticket's signed binding.
+  // A worktree review never falls back to the main checkout.
+  let workspaceRoot = null;
+  let workspaceRemoval = null;
+  if (review && review.identity) {
+    try {
+      const ws = R.recordedWorkspace(dataDir, t, review.identity.workspace, repo, { allowRemoved: allowRemovedWorkspace && !checkTree });
+      workspaceRoot = ws.root;
+      workspaceRemoval = ws.removal;
+    } catch (e) {
+      problems.push(e.message);
+    }
   }
 
   let record = null;
@@ -157,24 +177,26 @@ function verifyReview(dataDir, ref, id, cwd, { requireRecord, checkTree }) {
         [ident && record.implementationReport && record.implementationReport.id === ident.implementationReport
           && record.implementationReport.sha256 === ident.implementationReportSha256, "the approval is for a different implementation report"],
         [L.sameRepo(record.repo, repo), "the approval was given for a different repository"],
+        [R.sameWorkspace(record.workspace, ident && ident.workspace), "the approval was given for a different workspace (worktree, branch, base, or binding)"],
       ];
       for (const [ok, msg] of checks) if (!ok) problems.push(msg);
     }
   }
 
-  if (checkTree && review && review.identity) {
-    const now = R.treeIdentity(repo.root);
+  if (checkTree && review && review.identity && workspaceRoot) {
+    const now = R.treeIdentity(workspaceRoot);
     const approved = record ? record.tree : review.identity.tree;
     if (!R.sameTree(approved, now)) problems.push(`the code changed after the review (${R.treeDifferences(approved, now).join("; ")})`);
     if (record) {
-      const hashes = changedFileHashes(repo.root, record.changedFiles.map((f) => f.path));
+      const hashes = changedFileHashes(workspaceRoot, record.changedFiles.map((f) => f.path));
       const bad = hashes.filter((h, i) => h.sha256 !== record.changedFiles[i].sha256).map((h) => h.path);
       if (bad.length) problems.push(`approved file contents changed: ${bad.join(", ")}`);
     }
   }
 
   if (problems.length) fail(`${id} cannot be used: ${problems.map((p) => `${p}`).join("; ")}`);
-  return { t, s, repo, review, record, fileSha256: art.fileSha256 };
+  const workspace = (review.identity && review.identity.workspace) || { kind: R.LEGACY, path: repo.root };
+  return { t, s, repo, review, record, fileSha256: art.fileSha256, workspace, workspaceRoot, workspaceRemoval };
 }
 
 // Records the developer's approval of one current, PASS review.
@@ -195,12 +217,15 @@ function approveReview(dataDir, sessionId, ref, id, hash, cwd) {
   }
 
   const tree = review.identity.tree;
-  const changed = changedFileHashes(repo.root, review.facts.changedFiles);
+  const changed = changedFileHashes(v.workspaceRoot, review.facts.changedFiles);
   const record = {
     kind: "review-approval",
     issueKey: t.key,
     site: t.site,
     repo,
+    // The reviewed workspace, as signed into the review (Phase 8C). Absent
+    // for a review saved by an earlier version (in place).
+    ...(review.identity.workspace ? { workspace: review.identity.workspace } : {}),
     planRevision: s.n,
     planSha256: s.actualHash,
     implementationReport: { id: review.identity.implementationReport, sha256: review.identity.implementationReportSha256 },
@@ -215,6 +240,19 @@ function approveReview(dataDir, sessionId, ref, id, hash, cwd) {
     method: "developer typed /jira-dev-harness:approve-review (Claude Code user-only skill)",
   };
   record.hmac = L.sign(record, L.approvalKey(dataDir, true));
+  // An existing (invalid) record is kept under a new name before it is
+  // replaced, never overwritten.
+  if (fs.existsSync(file)) {
+    const old = fs.readFileSync(file);
+    for (let k = 1; ; k += 1) {
+      try {
+        fs.writeFileSync(file.replace(/\.json$/, `-replaced-${k}.json`), old, { flag: "wx" });
+        break;
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+    }
+  }
   fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n");
   return { ...v, already: false, record, file };
 }

@@ -43,7 +43,20 @@ fs.writeFileSync(draft, `# Implementation plan: ${KEY} subtract\n\nTicket: ${KEY
 const hash = /SHA-256: ([0-9a-f]{64})/.exec(ps(["save", DATA, SITE, KEY, draft]))[1];
 check(/GRANTED/.test(ps(["approve", DATA, SID, KEY, "r1", hash])), "setup: plan approved");
 check(/REVIEW: REFUSED\. r1 has no implementation report/.test(ps(["review-start", DATA, SID_REV, KEY])), "review refused before any implementation report");
-check(/AUTHORIZED/.test(ps(["implement-start", DATA, SID, KEY, "r1", hash])), "setup: implementation authorized");
+// Phase 8C: /implement now works in a sibling worktree, but review is not
+// moved there yet, so this suite uses an in-place implementing session as
+// plugin versions before Phase 8C recorded it (their review path is kept).
+{
+  const L = require(path.join(ROOT, "scripts", "lib", "approval.cjs"));
+  const { t, s, repo: identity } = L.verifyApproved(DATA, KEY, repo);
+  check(s.n === 1 && s.actualHash === hash, "setup: approval verified for the legacy in-place session");
+  fs.mkdirSync(path.join(DATA, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(DATA, "sessions", `${SID}.json`), JSON.stringify({
+    sessionId: SID, mode: "implementing", startedAt: new Date().toISOString(), authorizedAt: new Date().toISOString(),
+    issueKey: t.key, site: t.site, revision: 1, sha256: hash, planFile: s.planFile.replace(/\\/g, "/"), repo: identity,
+    baseline: { head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(), status: L.gitStatus(repo) },
+  }, null, 2));
+}
 fs.writeFileSync(path.join(repo, "src", "sub.js"), "module.exports = (a, b) => a - b;\n");
 const rd = ps(["draft-path", SITE, KEY, "report"]).trim();
 fs.writeFileSync(rd, `## Implementation report: ${KEY} r1\nStatus: COMPLETED\n`);

@@ -68,16 +68,28 @@ function git(args, cwd, options = {}) {
   return options.binary ? out : out.trim();
 }
 
-// `git status --porcelain` lines. Leading spaces are significant (" M" vs
-// "M "), so the output must not be trimmed at the start.
+// `git status --porcelain` lines ("XY path", or "XY orig -> path" for a
+// rename or copy). Leading spaces are significant (" M" vs "M "), so the
+// lines are never trimmed. Read from NUL-delimited output, so a path with
+// spaces, quotes, or non-ASCII characters is exact: the plain format quotes
+// and octal-escapes such paths.
 function gitStatus(root) {
-  const out = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+  const out = execFileSync("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], {
     cwd: root,
-    encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
     maxBuffer: 256 * 1024 * 1024,
-  });
-  return out.split(/\r?\n/).filter(Boolean);
+  }).toString("utf8");
+  const tokens = out.split("\0");
+  const lines = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (t.length < 4) continue;
+    const code = t.slice(0, 2);
+    // With -z a rename or copy is "XY new\0orig\0".
+    if (/[RC]/.test(code)) lines.push(`${code} ${tokens[(i += 1)]} -> ${t.slice(3)}`);
+    else lines.push(t);
+  }
+  return lines;
 }
 
 // Identity of the git repository containing `cwd`: its root path, its root

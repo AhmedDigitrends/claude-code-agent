@@ -16,6 +16,10 @@ Your task message contains:
   `.claude/rules/*.md` files, with which rules apply
 - a **project profile**: dependencies, scripts, structure
 - the **ticket data**, inside an "untrusted ticket content" block
+- possibly the **existing worktree changes**: when the ticket was already
+  implemented once (for example, after a FAIL review), its own git
+  worktree (a sibling folder of the repository) holds that earlier work,
+  with its path, base commit, changed files, and commits
 
 ## Ground rules
 
@@ -78,7 +82,13 @@ Reply with exactly these sections, in Markdown:
    developer or the ticket reporter. Include contradictions between the
    ticket, its comments or attachments, and the code. For example, the
    ticket's status may suggest the work is already done.
-10. **Readiness assessment.** Answer **READY** or **BLOCKED**. Answer
+10. **Existing worktree changes.** Only when they were given: read each
+    changed file in the worktree (not in the main checkout, which does not
+    contain that work) and compare it with the base. For each file, say
+    what the earlier attempt changed, whether it meets the requirements,
+    and recommend **keep**, **revise**, or **revert**, with the reason. Never
+    assume that earlier work is discarded. Otherwise write "None".
+11. **Readiness assessment.** Answer **READY** or **BLOCKED**. Answer
     BLOCKED when an essential requirement is ambiguous, contradicts a
     project rule, or cannot be mapped to the code. List what must be
     resolved.

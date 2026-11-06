@@ -16,6 +16,7 @@ const L = require("./approval.cjs");
 const R = require("./review.cjs");
 const RA = require("./review-approval.cjs");
 const P = require("./provider.cjs");
+const W = require("./worktree.cjs");
 
 const { fail } = L;
 
@@ -56,6 +57,110 @@ function protectedProblem(branch, base) {
   return null;
 }
 
+// --------------------------------------------------------- workspace (8C)
+//
+// A ticket implemented in its own sibling worktree is shipped from that
+// worktree, on its fixed branch jira/<KEY>, never from the main checkout. A
+// shipping session records its layout explicitly; only a review made in place
+// (by a version before Phase 8C) ships from the main checkout.
+
+const isWorktreeState = (state) => state.layout === "worktree" || !!(state.workspace && state.workspace.kind === "worktree");
+
+// The verified root git runs in for a shipping session. A worktree session
+// re-verifies the signed binding every time and never falls back.
+function workRoot(dataDir, state) {
+  const t = L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`);
+  if (!isWorktreeState(state)) {
+    // In place only for a ticket that never had a worktree.
+    if (W.hasWorktreeHistory(dataDir, t.site, t.key)) fail(`${t.key} has a plugin-managed worktree, so it is never shipped from the main checkout`);
+    return state.repo.root;
+  }
+  if (!state.workspace || state.workspace.kind !== "worktree") fail("this shipping session names a worktree but does not record it; run /jira-dev-harness:ship again");
+  return R.recordedWorkspaceRoot(dataDir, t, state.workspace, state.repo);
+}
+
+// SHA-256 of the developer's review approval record, so that shipping is bound
+// to the exact approval it was authorized with.
+function reviewApprovalSha256(dataDir, state) {
+  const file = RA.approvalFile(L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`), state.reviewId);
+  return fs.existsSync(file) ? L.sha256(file) : null;
+}
+
+function shipCommitRecordFile(t, reviewId, k) {
+  return path.join(R.reviewsDir(t), `ship-commit-${reviewId}${k > 1 ? `-${k}` : ""}.json`);
+}
+
+// Signed record of the shipping commit made in a ticket worktree, so that the
+// authorized commit is not mistaken for unreviewed work later (a re-review
+// after CI feedback, for example). Never overwritten.
+function writeShipCommitRecord(dataDir, state, sha, parent) {
+  const t = L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`);
+  const record = {
+    kind: "ship-commit",
+    issueKey: state.issueKey,
+    site: state.site,
+    reviewId: state.reviewId,
+    reviewSha256: state.reviewSha256,
+    commit: sha,
+    parent,
+    branch: state.branch,
+    workspace: state.workspace,
+    createdAt: new Date().toISOString(),
+  };
+  record.hmac = L.sign(record, L.approvalKey(dataDir, true));
+  for (let k = 1; ; k += 1) {
+    try {
+      fs.writeFileSync(shipCommitRecordFile(t, state.reviewId, k), JSON.stringify(record, null, 2) + "\n", { flag: "wx" });
+      return record;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+  }
+}
+
+// The commit as it must be before anything reaches the provider: HEAD is the
+// shipping commit, its parent is the approved HEAD, it contains exactly the
+// approved files, and each file's blob is the one hashed from the reviewed
+// content at commit time.
+function commitContentProblem(root, state) {
+  const head = run(root, ["rev-parse", "HEAD"]).stdout;
+  if (head !== state.commit) return "HEAD is no longer the commit that was made for this ticket";
+  if (run(root, ["rev-parse", `${state.commit}^`]).stdout !== state.approvedHead) return "the shipping commit's parent is not the approved HEAD";
+  const committed = run(root, ["diff-tree", "--no-commit-id", "--name-only", "-r", state.commit]).stdout.split(/\r?\n/).filter(Boolean).sort();
+  const expected = state.approvedFiles.map((f) => f.path).sort();
+  if (JSON.stringify(committed) !== JSON.stringify(expected)) return `the shipping commit contains ${committed.join(", ") || "nothing"}, not the approved files`;
+  if (state.committedBlobs) {
+    for (const f of state.approvedFiles) {
+      const inCommit = run(root, ["rev-parse", "--verify", "--quiet", `${state.commit}:${f.path}`]);
+      if (f.sha256 === "-" ? inCommit.status === 0 : inCommit.stdout !== state.committedBlobs[f.path]) {
+        return `${f.path} in the shipping commit differs from the reviewed content`;
+      }
+    }
+  }
+  return null;
+}
+
+// origin must still be the remote that shipping was authorized for.
+function remoteProblem(root, state) {
+  const r = run(root, ["config", "--get", "remote.origin.url"]);
+  const now = P.parseRemote(r.stdout);
+  if (!now || now.hasCredentials) return "origin is not a supported remote without embedded credentials";
+  const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+  if (!same(now.host, state.remote.host) || !same(now.owner, state.remote.owner) || !same(now.name, state.remote.name)) {
+    return `origin changed since shipping was authorized (now ${now.host}/${now.owner}/${now.name}, authorized ${state.remote.host}/${state.remote.owner}/${state.remote.name})`;
+  }
+  // `git push origin` uses remote.origin.pushurl when it is set, so it must
+  // name the same repository too.
+  const pushUrls = run(root, ["config", "--get-all", "remote.origin.pushurl"]).stdout.split(/\r?\n/).filter(Boolean);
+  for (const u of pushUrls) {
+    const p = P.parseRemote(u);
+    if (!p || p.hasCredentials || !same(p.host, state.remote.host) || !same(p.owner, state.remote.owner) || !same(p.name, state.remote.name)) {
+      return "origin's push URL (remote.origin.pushurl) does not point to the authorized repository";
+    }
+  }
+  return null;
+}
+
 function requireShipping(state, ...stages) {
   if (!state || state.mode !== "shipping") fail("this session has no shipping authorization; the developer must run /jira-dev-harness:ship");
   if (stages.length && !stages.includes(state.stage)) fail(`this step needs stage ${stages.join(" or ")}, but the session is at "${state.stage}"`);
@@ -72,7 +177,15 @@ function start(dataDir, sessionId, ref, reviewId, hash, options, cwd) {
   const v = RA.verifyReview(dataDir, ref, reviewId, cwd, { requireRecord: true, checkTree: true });
   if (hash !== v.fileSha256) fail(`the SHA-256 does not match ${reviewId}. Its SHA-256 is ${v.fileSha256}.`);
   const { t, s, repo, record } = v;
-  const root = repo.root;
+  // Phase 8C: a worktree review ships from the verified worktree (resolved
+  // through the signed binding by verifyReview); only an in-place review
+  // ships from the main checkout.
+  const worktree = v.workspace.kind === "worktree";
+  if (worktree && !v.workspaceRoot) fail("the ticket worktree could not be verified; nothing was changed");
+  if (worktree && options.branch) {
+    fail(`--branch is not allowed for a ticket worktree: ${t.key} ships on its fixed branch ${v.workspace.branch}`);
+  }
+  const root = worktree ? v.workspaceRoot : repo.root;
 
   const remote = P.parseRemote(L.git(["config", "--get", "remote.origin.url"], root));
   if (!remote) fail("the repository has no recognisable origin remote; a ticket branch can only be shipped to a hosted repository");
@@ -85,7 +198,12 @@ function start(dataDir, sessionId, ref, reviewId, hash, options, cwd) {
 
   const current = currentBranch(root);
   let branch = options.branch;
-  if (!branch) {
+  if (worktree) {
+    // The worktree's own branch, created with it; never created or switched here.
+    branch = v.workspace.branch;
+    if (branch !== `jira/${t.key}`) fail(`the worktree's recorded branch is ${branch}, not jira/${t.key}`);
+    if (current !== branch) fail(`the ticket worktree has ${current || "a detached HEAD"} checked out, not ${branch}; nothing was changed`);
+  } else if (!branch) {
     branch = current && !protectedProblem(current, base) && current.toLowerCase().includes(t.key.toLowerCase())
       ? current
       : `jira/${t.key}`;
@@ -103,8 +221,13 @@ function start(dataDir, sessionId, ref, reviewId, hash, options, cwd) {
 
   // Changes the developer already had before implementation can't be
   // separated from the implementation inside one file, so they stop the commit.
+  // The review's own record of them is used: in a ticket worktree there are
+  // none (everything since the approved base is ticket work).
   const files = record.changedFiles.map((f) => f.path);
-  const pre = new Set((R.latestReport(t, s.n).meta.preExistingChanges || []).map((l) => l.slice(3).replace(/^"|"$/g, "").replace(/^.* -> /, "")));
+  const preLines = (v.review.facts && Array.isArray(v.review.facts.preExistingChanges))
+    ? v.review.facts.preExistingChanges
+    : (R.latestReport(t, s.n).meta.preExistingChanges || []);
+  const pre = new Set(preLines.map((l) => l.slice(3).replace(/^"|"$/g, "").replace(/^.* -> /, "")));
   const overlap = files.filter((f) => pre.has(f));
   if (!files.length) fail("the approved review has no changed files to commit");
   if (overlap.length) fail(`these files already had uncommitted changes before implementation, so the commit can't be limited to the approved work: ${overlap.join(", ")}`);
@@ -120,12 +243,15 @@ function start(dataDir, sessionId, ref, reviewId, hash, options, cwd) {
     sha256: s.actualHash,
     planFile: s.planFile.replace(/\\/g, "/"),
     repo,
+    layout: worktree ? "worktree" : "legacy-in-place",
+    workspace: v.workspace,
     remote,
     base,
     branch,
     startBranch: current,
     reviewId,
     reviewSha256: v.fileSha256,
+    reviewApprovalSha256: L.sha256(RA.approvalFile(t, reviewId)),
     approvedHead: record.tree.head,
     approvedFiles: record.changedFiles,
     jiraUrl: `https://${t.site}/browse/${t.key}`,
@@ -142,6 +268,13 @@ function gateProblem(dataDir, state, { tree }) {
     const v = RA.verifyReview(dataDir, `${state.site}/${state.issueKey}`, state.reviewId, state.repo.root, { requireRecord: true, checkTree: tree });
     if (v.fileSha256 !== state.reviewSha256) return "the review is not the one that was authorized for shipping";
     if (!L.sameRepo(v.repo, state.repo)) return "the repository identity changed";
+    // Phase 8C: the same signed workspace and the same developer approval.
+    if (isWorktreeState(state) || v.workspace.kind === "worktree") {
+      if (!R.sameWorkspace(v.workspace, state.workspace)) return "the reviewed workspace is not the one shipping was authorized for";
+    }
+    if (state.reviewApprovalSha256 && reviewApprovalSha256(dataDir, state) !== state.reviewApprovalSha256) {
+      return "the developer's review approval changed since shipping was authorized";
+    }
     return null;
   } catch (e) {
     return e.message;
@@ -168,7 +301,8 @@ function commit(dataDir, state, messageText) {
   requireShipping(state, "started");
   const problem = gateProblem(dataDir, state, { tree: true });
   if (problem) fail(`commit refused: ${problem}`);
-  const root = state.repo.root;
+  const root = workRoot(dataDir, state);
+  const worktree = isWorktreeState(state);
   const message = checkMessage(messageText, state);
   const why = protectedProblem(state.branch, state.base);
   if (why) fail(`will not commit for a protected or default branch: ${why}`);
@@ -181,6 +315,10 @@ function commit(dataDir, state, messageText) {
   if (head !== state.approvedHead) fail("HEAD moved since the review was approved");
 
   const cur = currentBranch(root);
+  if (worktree && cur !== state.branch) {
+    // A worktree ships on its own branch; shipping never creates or switches one.
+    fail(`the ticket worktree has ${cur || "a detached HEAD"} checked out, not ${state.branch}; nothing was committed`);
+  }
   if (cur !== state.branch) {
     if (run(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${state.branch}`]).status === 0) {
       fail(`branch ${state.branch} already exists locally`);
@@ -223,7 +361,10 @@ function commit(dataDir, state, messageText) {
     if (wrong.length) {
       fail(`commit ${sha.slice(0, 12)} was created on ${state.branch} but does not match what was approved: ${wrong.join("; ")}. Nothing will be pushed. Inspect it, and undo it yourself if needed`);
     }
-    return { ...state, stage: "committed", commit: sha, committedAt: new Date().toISOString(), hookOutput: c.out.split(/\r?\n/).slice(-5) };
+    // In a worktree, the authorized shipping commit is recorded (signed), so
+    // that it is not mistaken for unreviewed work on the ticket branch later.
+    if (worktree) writeShipCommitRecord(dataDir, state, sha, parent);
+    return { ...state, stage: "committed", commit: sha, committedBlobs: blobs, committedAt: new Date().toISOString(), hookOutput: c.out.split(/\r?\n/).slice(-5) };
   } catch (e) {
     unstage();
     throw e;
@@ -232,20 +373,34 @@ function commit(dataDir, state, messageText) {
 
 // --------------------------------------------------------------------- push
 
+// Everything that must still hold before a push or a pull request: the gate
+// chain (plan, review, the developer's review approval, the signed worktree
+// binding and workspace), the branch, the shipping commit's exact content,
+// and the authorized remote. Re-run before every provider write, including
+// by the guard before an MCP pull request call.
 function committedProblem(dataDir, state) {
-  const root = state.repo.root;
-  const gate = gateProblem(dataDir, state, { tree: false });
-  if (gate) return gate;
-  if (run(root, ["rev-parse", "HEAD"]).stdout !== state.commit) return "HEAD is no longer the commit that was made for this ticket";
-  if (currentBranch(root) !== state.branch) return `the checked-out branch is not ${state.branch}`;
-  return protectedProblem(state.branch, state.base);
+  try {
+    if (!state || state.mode !== "shipping") return "no shipping authorization in this session";
+    if (!state.commit) return "nothing has been committed in this session";
+    const gate = gateProblem(dataDir, state, { tree: false });
+    if (gate) return gate;
+    const root = workRoot(dataDir, state);
+    if (currentBranch(root) !== state.branch) return `the checked-out branch is not ${state.branch}`;
+    const content = commitContentProblem(root, state);
+    if (content) return content;
+    const remote = remoteProblem(root, state);
+    if (remote) return remote;
+    return protectedProblem(state.branch, state.base);
+  } catch (e) {
+    return e.message;
+  }
 }
 
 function push(dataDir, state) {
   requireShipping(state, "committed");
   const problem = committedProblem(dataDir, state);
   if (problem) fail(`push refused: ${problem}`);
-  const root = state.repo.root;
+  const root = workRoot(dataDir, state);
   const ref = `refs/heads/${state.branch}`;
   // No force, no other refspec: the new branch fast-forwards or the push fails.
   const r = run(root, ["push", "--set-upstream", "origin", `${ref}:${ref}`]);
@@ -277,10 +432,12 @@ function prepare(dataDir, state, draftText) {
   return { ...state, prepared: { title, body, bodySha256: L.sha256Of(body) } };
 }
 
-function createWithGh(state) {
+function createWithGh(dataDir, state) {
   requireShipping(state, "pushed");
   if (!state.prepared) fail("run ship-prepare-pr first so the title and body are fixed");
-  const info = P.officialGh(state.repo.root, state.remote.host);
+  const problem = committedProblem(dataDir, state);
+  if (problem) fail(`pull request refused: ${problem}`);
+  const info = P.officialGh([state.repo.root, workRoot(dataDir, state)], state.remote.host);
   if (!info.ok) {
     fail(`the GitHub CLI adapter is unavailable: ${info.reason}. Use your GitHub MCP connection, or open the pull request manually with the prepared title and body`);
   }
@@ -302,22 +459,34 @@ function createWithGh(state) {
 // Records a pull request that Claude created through the developer's GitHub
 // MCP connection. The URL is Claude's report, so it is only checked for
 // belonging to this repository and is labelled as reported.
-function recordPr(state, url) {
-  requireShipping(state, "pushed");
+// At stage pr-created it records a correction of the pull request details,
+// which merge.cjs appends as a new signed ship record revision (the earlier
+// record is never overwritten).
+function recordPr(dataDir, state, url) {
+  requireShipping(state, "pushed", "pr-created");
   if (!state.prepared) fail("no pull request text was prepared in this session");
+  const problem = committedProblem(dataDir, state);
+  if (problem) fail(`recording the pull request refused: ${problem}`);
   const bad = P.prUrlProblem(state.remote, url);
   if (bad) fail(bad);
-  return { ...state, stage: "pr-created", pr: { url: url.trim(), via: "github-mcp (reported by Claude; open the link to confirm)" }, prAt: new Date().toISOString() };
+  const correction = state.stage === "pr-created";
+  return {
+    ...state,
+    stage: "pr-created",
+    pr: { url: url.trim(), via: "github-mcp (reported by Claude; open the link to confirm)", ...(correction ? { correctionOf: state.pr && state.pr.url } : {}) },
+    prAt: new Date().toISOString(),
+  };
 }
 
 function checks(state) {
   requireShipping(state, "pr-created");
-  const info = P.officialGh(state.repo.root, state.remote.host);
+  const info = P.officialGh([state.repo.root, state.workspace && state.workspace.path].filter(Boolean), state.remote.host);
   if (!info.ok) return { available: false, reason: info.reason };
   const number = Number(/\/pull\/([0-9]+)$/.exec(state.pr.url)[1]);
   return { available: true, ...P.GhAdapter.pullRequestChecks(info, state.remote, number) };
 }
 
 module.exports = {
-  BRANCH_RE, protectedProblem, defaultBranch, start, gateProblem, commit, push, prepare, createWithGh, recordPr, checks, requireShipping,
+  BRANCH_RE, protectedProblem, defaultBranch, start, gateProblem, committedProblem, commit, push, prepare, createWithGh, recordPr, checks, requireShipping,
+  isWorktreeState, workRoot,
 };

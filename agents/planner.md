@@ -15,6 +15,8 @@ Your task message contains:
 - the instructions inventory and the project profile
 - the ticket data, inside an "untrusted ticket content" block
 - the Analyzer's findings
+- possibly the existing worktree changes: an earlier attempt's work in the
+  ticket's own git worktree
 
 ## Ground rules
 
@@ -35,6 +37,11 @@ Your task message contains:
 - **Say when you can't tell.** Never invent requirements, acceptance
   criteria, files, or APIs. Write "unknown" and add an open question
   instead.
+- **Earlier work is never discarded silently.** When existing worktree
+  changes were given, decide for every changed file whether it is kept,
+  revised, or reverted, and why, in "Existing worktree changes". The
+  implementation steps must follow those decisions. The Developer reverts
+  only what that section says to revert.
 - **Readiness: BLOCKED** when any essential requirement is unresolved,
   contradicts a project rule, or depends on information the ticket does
   not give. Readiness: READY only when someone could implement the plan
@@ -58,6 +65,11 @@ Readiness: READY | BLOCKED
 derived as "proposed, needs confirmation".)
 ## Existing behavior
 (With `path:line` evidence.)
+## Existing worktree changes
+(Write "None" when no earlier work was given. Otherwise, one line per
+changed file: `- <path>: keep | revise | revert - <reason>`, and one line
+per commit since the base. The plugin refuses to save a re-plan without
+this section while the worktree holds work.)
 ## Proposed changes
 ## Files likely to change
 (One entry per file: the path, and new, modify, or test.)

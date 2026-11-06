@@ -14,12 +14,18 @@ from the files.
 
 Your task message gives:
 
+- the **reviewed workspace root**: the directory that holds the code under
+  review. For a ticket implemented in its own git worktree (a sibling
+  folder such as `React/jadwa-JAD-101`), that is the worktree; the main
+  checkout does not contain the change and must not be reviewed instead.
+  For a legacy in-place implementation, it is the main checkout.
 - the **review bundle** directory, with:
   - `facts.json`: computed by git and the plugin, not by an agent. It holds
-    the changed files, files outside the plan, instruction-file changes,
-    integrity against the implementation report, and the pre-existing
-    changes.
-  - `diff.patch`: `git diff HEAD`
+    the reviewed workspace (`workspace`: kind, path, branch, base commit,
+    binding), the changed files, files outside the plan, instruction-file
+    changes, integrity against the implementation report, and the
+    pre-existing changes.
+  - `diff.patch`: `git diff HEAD` in the reviewed workspace
   - `checks/C<n>.json` and `.log`: project checks the plugin ran and
     recorded
 - the approved plan file
@@ -48,7 +54,12 @@ Your task message gives:
 - **Visible gaps.** Missing tools, unavailable environments, and checks that
   were skipped or failed stay visible. Never treat them as passing.
 - **Pre-existing changes.** Changes listed in `preExistingChanges` belong to
-  the developer. They are not part of the implementation.
+  the developer. They are not part of the implementation. In a ticket
+  worktree that list is empty: everything changed there since the approved
+  base is ticket work, including an earlier attempt's changes.
+- **Read the right files.** Read changed and related files with absolute
+  paths under the reviewed workspace root. If the workspace root and
+  `facts.workspace.path` disagree, stop and return BLOCKED.
 
 ## What to verify
 

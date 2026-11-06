@@ -91,6 +91,9 @@ Some operations deliberately have no dedicated AI agent:
 | 5 | Independent Reviewer Agent | Completed |
 | 6 | Approval Gates + Git/PR | Completed |
 | 7 | Jira Progress Automation | Completed |
+| 8A | Per-developer connection onboarding | Implemented (offline-tested; live checks pending) |
+| 8B | Assigned-ticket discovery | Implemented (offline-tested; live Jira check pending) |
+| 8C | Git worktree isolation | Implemented in v0.8.0; offline-tested and live-tested with mocked GitHub and Jira; real services pending |
 | 8 | End-to-End Testing + Team Rollout | Pending |
 
 ---
@@ -1446,6 +1449,301 @@ cases, and PostToolUse behavior on the identity reads.
 
 ---
 
+## Phase 8B: Assigned-ticket discovery
+
+**Status:** Implemented (offline-tested; live Jira check pending)
+
+**Scope delivered:**
+
+- `/jira-dev-harness:ticket` accepts a ticket URL, a bare key (`PROJ-123`),
+  or no argument. Parsing is done by `plan-store.cjs ticket-ref`
+  (`scripts/lib/discover.cjs`), which never contacts Jira. A URL must be
+  `https`, a plain `<site>.atlassian.net` host (no port or user info), and
+  carry `/browse/KEY-123` or `selectedIssue=KEY-123`. A bare key takes the
+  site from the repository's mapping file; with no site there, the workflow
+  uses the one accessible site or asks, and never guesses.
+- **No argument** lists the developer's own tickets. The only query is the
+  constant `assignee = currentUser() AND statusCategory != Done ORDER BY
+  updated DESC`, printed by `plan-store.cjs assigned-jql`. `--include-done`
+  drops the Done clause, and only when the developer asks. It has no other
+  input. The list shows key, summary, project, status, and a mapping verdict
+  per ticket (`plan-store.cjs mapping-status`: `verified`, `mismatch`, or
+  `unverified`, with the same rules as the workflow's mapping gate). Jira
+  text is shown as one cleaned line.
+- **Explicit selection.** The skill stops after the list. Only the
+  developer's own reply selects a ticket, never automatically, even with one
+  result. After selection, every existing gate runs unchanged: the mapping is
+  verified before the ticket body, comments, or attachments are read.
+- The guard allows `ticket-ref`, `assigned-jql`, and `mapping-status` in
+  workflow sessions (no store argument needed) and keeps every Jira write
+  denied.
+
+**Validation (2026-11-05, Node 24.14, git 2.53, Windows 11):**
+
+- `tests/discover.test.cjs`: 25 of 25. It covers the query and its
+  injection resistance, URL and key parsing (15 invalid shapes), text
+  cleaning, row reduction, the mapping verdict (verified, mismatch,
+  uncommitted, untracked, missing, malformed), the plan-store commands and
+  that they change nothing, the guard (discovery commands allowed, 6 Jira
+  write shapes denied, approvals and chaining denied), and the skill's
+  wording.
+- An offline probe through the real guard in a planning session: quoted
+  `selectedIssue` URLs that contain `&` are allowed, and the same URL
+  unquoted is denied (fail-safe; the skill says to quote it).
+
+**Not validated live:** no real Atlassian connection was available (the
+connector is unauthenticated on the test machine), so `searchJiraIssuesUsingJql`,
+`atlassianUserInfo`, and the real response shapes were not exercised, and
+nothing was read from or written to Jira.
+
+**Limitations:**
+
+- That the search uses exactly the `assigned-jql` text is enforced by the
+  skill's instructions, not by the guard. The search tool is read-only and
+  Jira enforces the user's permissions, but the guard does not compare the
+  JQL.
+- `ticket-ref` reads the site for a bare key from the mapping file even when
+  that file is uncommitted. This only picks the site; the mapping gate still
+  refuses an uncommitted or mismatched mapping before the ticket is read.
+
+---
+
+## Phase 8C: Git worktree isolation
+
+**Status:** Implemented in v0.8.0. Offline-tested (steps 1-6), and
+live-tested with the plugin loaded in Claude Code (Stage 1 and the LIVE-3
+end-to-end run, see the validation log) using a disposable repository and
+mocked GitHub and Atlassian servers. Real GitHub and Jira validation is
+pending. Step 6 (`tests/worktree-remove.test.cjs`,
+`tests/e2e-offline.test.cjs`): user-only `/jira-dev-harness:worktree-remove`
+(unforced `git worktree remove`, branch kept, no prune, signed removal
+record, exact-set `--confirm-ignored`, refusals for dirty, unpushed,
+sensitive, active, tampered, and moved worktrees), merge verification after
+an authorized removal, append-only signed ship record revisions, and
+re-planning that must account for existing worktree changes. Step 1 of the
+implementation is done and offline-tested: `scripts/lib/worktree.cjs`
+(path rules, creation, signed binding, registry, verification, dependency
+and filter reports) with `tests/worktree.test.cjs`. Step 2 is done and
+offline-tested: `save` records `baseHead` and `dirtyPaths`, `approve`
+checks the base (a full commit in this repository's history, still HEAD)
+and signs it into the approval, worktree creation takes its base only from
+the signed approval, and the read-only `worktree-status` command reports it
+(`tests/plan-base.test.cjs`). Step 3 is done and offline-tested
+(`tests/implement-worktree.test.cjs`, migrated `tests/legacy/phase4-tests.cjs`):
+`/implement` creates the worktree, stops for `/add-dir`, and authorizes on
+the next run with the signed binding recorded in the session; the guard
+confines Developer writes to the verified worktree and requires the
+`cd "<worktree>" &&` prefix on its commands (documented as not a sandbox);
+registered worktrees are protected in every session; `worktree-status` is
+allowed; git status parsing is NUL-delimited; replaced approval records are
+kept. Step 4 is done and offline-tested (`tests/review-worktree.test.cjs`):
+reports state their layout (`worktree` with the binding number and
+signature, or `legacy-in-place`); `review-start`, `run-check`, `review-save`,
+`review-status`, and `approve-review` resolve the primary identity and the
+worktree separately and re-verify the signed binding; review records, the
+HTML and Markdown reports, and review approvals bind the workspace; a
+worktree review never falls back to the main checkout; replaced review
+approvals are kept; `review-status` ignores unsigned records. Step 5 is
+done and offline-tested (`tests/ship-worktree.test.cjs`, local bare origin,
+pull requests recorded through the MCP route, no provider called):
+shipping runs in the verified worktree on `jira/<KEY>` (`--branch` refused,
+no branch created or switched); every step re-verifies the chain, the
+signed binding, the developer's exact review approval (by SHA-256), the
+shipping commit's parent, files, and blobs, and the remote including
+`remote.origin.pushurl`; the guard re-runs the same check before an MCP
+pull request call; the shipping commit is recorded (signed) so a later
+re-review accepts it and refuses any other commit; ship and merge records
+bind the workspace and the approval. Next step: worktree removal. It must land before
+Phase 8, so that the end-to-end runs validate the final architecture.
+
+Interactive check (2026-11-05, done by the developer): `/add-dir` authorized
+the sibling worktree, and a subagent could `cd` into it; after
+`claude --resume` a new subagent could still `cd` into it. Headless runs
+showed the opposite on resume (access was lost without `--add-dir`). The
+plugin therefore treats directory access as environment-dependent and
+never relies on it persisting.
+
+**Objective:** Every approved ticket is implemented in its own plugin-managed
+**sibling** git worktree on its own ticket branch, so that the developer's
+main checkout is never changed by ticket work. All later steps (report,
+review, checks, review approval, commit, push, pull request) act on that
+worktree. Every existing gate, signature, immutable record, and protection
+stays as it is.
+
+**Requirements (confirmed):**
+
+1. `/jira-dev-harness:implement` creates the worktree and branch after the
+   approval is re-verified and before any Developer write.
+2. Location: a sibling of the main checkout, `<parent>/<project>-<ISSUE-KEY>`.
+   For example, `React/jadwa` gives `React/jadwa-JAD-101` and
+   `React/jadwa-JAD-102`. There is no central worktrees directory.
+3. The main checkout is not changed by implementation.
+4. One worktree per active ticket; a resumed or repeated `implement` reuses
+   the ticket's verified worktree.
+5. Based on the exact committed HEAD recorded with the approved plan. A
+   mismatch is reported and refused, never rebased.
+6. `sameRepo()` and the signed plan approval are unchanged. The worktree gets
+   its own signed, separately verified binding.
+7. Developer writes, project commands, review facts, checks, review-approval
+   hashes, commit, push, and pull request all target the authorized worktree.
+8. Claude never runs `git worktree` itself. Only fixed-argument plan-store
+   steps inside user-only commands create or remove worktrees.
+9. A worktree is never deleted automatically, uncommitted work is never
+   discarded, and ignored files are never removed silently.
+10. Missing dependencies in a fresh worktree are detected and reported.
+    Nothing is installed without explicit permission.
+11. Windows paths, spaces, symlink and junction escapes, name collisions, and
+    concurrent tickets are handled. No new dependencies.
+
+**Decisions (approved):**
+
+1. A plan without a recorded base HEAD (saved before this phase) needs a new
+   revision and a new approval before `implement`.
+2. `implement` is refused if uncommitted main-checkout changes recorded at
+   plan time touch the plan's files (they would be missing from the
+   worktree). Other uncommitted changes give a warning.
+3. Missing dependencies are reported. An install runs only with the
+   developer's explicit permission.
+4. Repository hooks are disabled for the worktree creation step
+   (`core.hooksPath` pointed at an empty directory the plugin creates).
+   Checkout filters are investigated separately (see the probes).
+5. The branch is fixed: `jira/<KEY>`. `/ship --branch` is refused for
+   worktree tickets.
+6. Ignored files are never removed silently. Removal lists them and needs an
+   explicit confirmation. Sensitive files (the ship step's secret-file
+   patterns, such as `.env` and key files) block removal until the developer
+   has moved them.
+7. The guard protects plugin-managed worktrees (paths in the plugin's
+   registry) and does not restrict other `git worktree` use in ordinary
+   sessions.
+8. When Claude Code needs access to the sibling directory, `implement`
+   tells the developer to type `/add-dir "<worktree path>"`. Permissions are
+   never bypassed.
+
+**Feasibility checks (2026-11-05, read-only for this repository, throwaway
+repositories under the session scratchpad with spaces in the path; Claude
+Code 2.1.318, git 2.53, Node 24.14, Windows 11):**
+
+| Check | Result |
+| :- | :- |
+| `git worktree add -b jira/JAD-101 "<parent>/jadwa-JAD-101" <base>` with spaces in the path | Works. Same root commit, origin, and `--git-common-dir` (`<main>/.git`) as the main checkout; its own `--git-dir` (`<main>/.git/worktrees/jadwa-JAD-101`); the worktree's `.git` is a file; `refs/remotes/origin/HEAD` is shared |
+| The plugin's `repoIdentity` / `sameRepo` on a worktree | Different root, so `sameRepo(main, worktree)` is false: the separate binding is required, and `sameRepo` need not change |
+| `git worktree list --porcelain` | Absolute forward-slash paths, `HEAD <sha>`, `branch refs/heads/<name>`: parseable for verification |
+| Existing branch, existing directory, junction at the sibling path | Each refused by git (`already exists`); `lstat` reports a junction as a symbolic link |
+| Name collision differing only in case | On Windows `JADWA-jad-101` resolves to the existing `jadwa-JAD-101`: the check must be case-insensitive on Windows |
+| `post-checkout` hook during `worktree add` | Runs by default. With `-c core.hooksPath=<empty dir>` it does not run |
+| Checkout (smudge) filter during `worktree add` | Runs even with hooks disabled. `--no-checkout` runs none, and a command-line `-c filter.<name>.smudge=cat` suppresses one. Filter commands come only from the user's own git config (the global LFS filter is present here), never from repository content, unlike `core.hooksPath`, which can point into the repository |
+| `git worktree remove` without `--force` | Refuses tracked or untracked changes, but **silently deleted ignored files, including `.env` and `node_modules`**. The plugin must check ignored files itself before calling it |
+| `git worktree remove` with an ignored junction in the worktree (pre-release audit, 2026-11-06) | git lists the junction target's files as ignored files of the worktree, and removal **deleted the target's files outside the worktree**. Removal now refuses any untracked symbolic link or junction in the worktree |
+| Claude Code without `--add-dir`: Read, Write, Bash `cd` into the sibling | Read and Write ask for permission. A subagent's `cd` is **hard-blocked** ("may only change directories to the allowed working directories") |
+| Claude Code with `--add-dir <worktree>` | Read works; a subagent's `cd` works; Write still prompts (as intended) |
+| Shell working directory | Resets to the session directory after every Bash call. The hook input's `cwd` stays the session directory, also in subagents and after a `cd`, so the guard cannot rely on `cwd` |
+| `cd "<wt>" && git ...` and `git -C "<wt>" ...` | Both need approval (Claude Code's own check for git in another directory). Git facts in the worktree must therefore come from plan-store commands, not from Claude's git calls |
+| `cd "<wt>" && <project command>` | A normal approval prompt for the project command |
+
+Not checked yet: the interactive `/add-dir` command (only the `--add-dir`
+flag could be tested headless) and Windows long paths over 260 characters
+(`core.longpaths` is unset on this machine).
+
+**Planned design:**
+
+- New `scripts/lib/worktree.cjs` (no dependencies):
+  - **Path:** `<realpath(parent of the main root)>/<basename(main root)>-<KEY>`.
+    It refuses a main checkout at a filesystem root, a target inside the main
+    checkout, and a target whose path already exists in any letter case
+    unless it is this ticket's verified worktree.
+  - **Create:** under an exclusive per-ticket lock, run
+    `git -C <main> -c core.hooksPath=<empty dir> worktree add -b jira/<KEY> <path> <baseHead>`
+    with `spawnSync` and fixed arguments. Then check with `lstat` that the
+    result is a real directory, and that its `realpath` equals the expected
+    path.
+  - **Binding:** HMAC-signed `plans/<site>/<KEY>/worktree-b<N>.json`
+    (exclusive create, never overwritten; a later removal adds
+    `worktree-b<N>-removed.json`), holding the primary repository identity
+    (unchanged format), the worktree real path, `git-common-dir`, branch,
+    base commit, the plan revision and SHA-256 it was created for, and when
+    it was created.
+  - **Registry:** one file per ticket, `worktrees/registry/<site>__<KEY>.json`
+    in the plugin data directory, used by the guard to recognise managed
+    paths. It only adds protection, so it is not trusted for authorization.
+  - **Verify:** signature; `realpath` and no link; listed in
+    `git worktree list --porcelain` of the main checkout; same common
+    directory; branch `jira/<KEY>` checked out.
+  - **Dependency report:** ignored top-level entries of the main checkout
+    (`git status --ignored --porcelain`) that are missing in the worktree.
+    Report only; nothing is copied or linked.
+  - **Removal:** see below.
+- **Plan base:** `save` records the full HEAD and the dirty paths;
+  `approve` signs the base commit into the approval (an additive field).
+- **Resolver:** one function maps the current directory (the main checkout,
+  or a managed worktree with a valid binding) to the primary identity plus
+  the work root. Every command that now calls `repoIdentity(process.cwd())`
+  uses it.
+- **Git facts:** they come only from plan-store commands (`report-save`,
+  `review-start`, a new read-only `worktree-status`), never from Claude's own
+  git calls in the worktree.
+- **Guard:**
+  - Developer writes must be inside the bound worktree; the main checkout is
+    off limits during implementation.
+  - Developer commands must start with `cd "<worktree>"` and must not leave
+    it; they still always ask.
+  - Developer writes need a worktree binding.
+  - The binding, registry, and lock join the protected store names.
+  - In every session, Claude's `git worktree remove|move|prune|repair` and
+    recursive deletes that name a registered path are denied. Other
+    worktree use is unaffected.
+- **Pre-existing changes:** a managed worktree starts clean at the base, so
+  everything in it is ticket work. This also fixes today's refusal by `ship`
+  after a repeated `implement`.
+- **Removal:** a new user-only `/jira-dev-harness:worktree-remove <KEY>`.
+  It refuses on:
+  - an unverified binding
+  - tracked or untracked changes
+  - an unpushed branch (unless `--unpushed`)
+  - an active session for that ticket
+  - sensitive ignored files
+
+  It lists the other ignored files and needs
+  `--confirm-ignored <count>`. It runs `git worktree remove` without
+  `--force`, never deletes the branch, never prunes, and writes a removal
+  record.
+- **Legacy:** in-flight in-place implementations (reports without a binding)
+  can still be reviewed, approved, shipped, and merged, labelled as legacy.
+  New Developer writes need a worktree.
+
+**Acceptance criteria:**
+
+- `implement` creates exactly one worktree at `<parent>/<project>-<KEY>`, on
+  `jira/<KEY>`, at the plan's base commit, before the first Developer write,
+  and reuses it on resume and repeat.
+- The main checkout's `git status`, HEAD, index, and files are byte-identical
+  before and after implement, review, approve-review, and ship.
+- Every Developer write outside the worktree, including into the main
+  checkout, is denied: traversal, symlinks, junctions, a junctioned sibling
+  path, and a case-variant path.
+- A base mismatch, a missing base, an existing directory, a foreign or
+  unregistered worktree, an existing branch, and a relevant dirty main
+  checkout are each refused, with nothing changed.
+- No repository hook runs during worktree creation.
+- Review facts, check logs, review-approval file hashes, and the commit come
+  from the worktree; the approval chain still binds the unchanged primary
+  identity.
+- Removal refuses each unsafe case above, never deletes an ignored file
+  without the typed confirmation or a sensitive file at all, never uses
+  `--force`, and never deletes the branch.
+- Two tickets run concurrently in separate sibling worktrees. Two concurrent
+  `implement` runs for the same ticket give one worktree and one clear
+  refusal.
+- A fresh worktree reports missing dependency directories, and nothing is
+  installed.
+- When Claude Code lacks access, `implement` prints the `/add-dir` line, and
+  nothing bypasses a permission.
+- Paths with spaces work on Windows. All earlier suites pass, updated only
+  where the location of the work moves into the worktree.
+  `claude plugin validate . --strict` passes.
+
+---
+
 ## Phase 8: End-to-End Testing + Team Rollout
 
 **Status:** Pending
@@ -1536,3 +1834,11 @@ and distribute the plugin to the team.
 | 2026-11-02 | Phase 7 | `claude plugin validate . --strict` | Passed |
 | 2026-11-02 | Phase 7 | Live, mock `atlassian` MCP server | 7 reads recorded by the real hook; the exact planned transition reached a prompt; a Done transition and an edit were refused; 0 writes reached the server |
 | 2026-11-02 | Phase 7 | Real Atlassian connector | Unauthenticated: only authenticate tools present, so no real tool discovery was possible |
+| 2026-11-05 | Phase 8B | `node --test` (incl. `tests/discover.test.cjs`, 25 cases) | 148 of 148 |
+| 2026-11-05 | Phase 8B | Legacy guard, Phase 4, Phase 5 suites | 60 of 60, 74 of 74 (1 skipped), 68 of 68 |
+| 2026-11-05 | Phase 8B | `claude plugin validate . --strict` | Passed (existing licence, icon, and marketplace-install-line items) |
+| 2026-11-05 | Phase 8B | Live Jira discovery | Not run: no authenticated Atlassian connection |
+| 2026-11-06 | Phase 8C | `node --test`; legacy guard, Phase 4, Phase 5 suites; `claude plugin validate . --strict` | 250 of 250; 60 of 60, 99 of 99 (1 symlink case skipped without Developer Mode), 68 of 68; passed |
+| 2026-11-06 | Phase 8C | Live Stage 1 (developer-run, isolated `CLAUDE_CONFIG_DIR` and `TEMP`, `--plugin-dir`, `--strict-mcp-config`, disposable repository, test site `jdh-livetest.atlassian.net`): approve, `/implement` worktree creation and ACCESS NEEDED, interactive `/add-dir`, re-run, Developer implementation in the worktree, three guard denials (main-conversation write to the main checkout, Developer write to the main checkout, Developer write to another ticket's worktree) | Passed. Main checkout byte-identical to its baseline; LIVE-1 holds only the two planned changes; LIVE-2 untouched; no stray files; records verify with the isolated key; real plugin data byte-identical |
+| 2026-11-06 | Phase 8C | Live LIVE-3 end-to-end (developer-run, isolated profile, disposable repository, local bare remote with network transports blocked, mocked GitHub and Atlassian MCP servers): approve, implement, independent review, review approval, ship (commit, push, pull request), merge, Jira sync with `--allow-done` | Passed. Main checkout byte-identical to its baseline; local `main` has exactly one squash commit with the two reviewed files; stage `merged`; mock ticket Done with one comment; all signed records valid; ledger intact; real plugin data byte-identical |
+| 2026-11-06 | v0.8.0 release prep | `jira-status` header showed the stale session phase "planned" after confirmed writes | Fixed (reporting only: progress derived from the signed ledger); regression assertion added to `tests/jira.test.cjs` |

@@ -18,15 +18,25 @@
 //    - permission_mode is "default" (attended; no auto-accept or bypass)
 //    - the authorized plan is still the latest, intact, approved revision
 //      for the same repository, with a valid mapping
-//    - the target resolves, after following symlinks, inside the approved
-//      repository and outside .git/, .claude/, .mcp.json, the mapping file,
-//      and project instruction files (unless the approved plan's
-//      "Proposed project-rule updates" section names that file with
+//    - the session's ticket worktree (Phase 8C) is still the ticket's signed,
+//      verified binding; a session without one (authorized in place by an
+//      older version) gets no new writes
+//    - the target resolves, after following symlinks, inside that worktree
+//      (never the main checkout) and outside .git, .claude/, .mcp.json, the
+//      mapping file, and project instruction files (unless the approved
+//      plan's "Proposed project-rule updates" section names that file with
 //      "Apply in implementation: yes")
 //    Allowed writes return "ask", so Claude Code prompts the developer for
-//    every edit even if allow rules exist. Its shell commands: git state
-//    changes and hosting CLIs are denied; read-only commands follow the
-//    normal permission flow; everything else returns "ask".
+//    every edit even if allow rules exist. Its shell commands must start with
+//    `cd "<worktree>" &&` and not change directory again; git state changes
+//    and hosting CLIs are denied; read-only commands follow the normal
+//    permission flow; everything else returns "ask". The prefix only sets
+//    where a command starts: it is not a filesystem sandbox, and an approved
+//    command can still reach any path the developer's user can.
+// 1b. Every session: plugin-managed worktrees (registered paths) cannot be
+//    removed, moved, repaired, or recursively deleted by Claude's shell
+//    commands, and `git worktree prune` is refused while a registered
+//    worktree directory is missing. Other git and worktree use is unaffected.
 // 3. All other plugin agents (jira-dev-harness:*) may never write files, run
 //    shell commands, or use MCP write tools.
 // 4. Workflow sessions (planning or implementing), for the main conversation
@@ -66,6 +76,8 @@ const M = require("./lib/merge.cjs");
 const JG = require("./lib/jira-gate.cjs");
 const JS = require("./lib/jira-sync.cjs");
 const PR = require("./lib/progress.cjs");
+const W = require("./lib/worktree.cjs");
+const S = require("./lib/ship.cjs");
 
 const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 const DEVELOPER = "jira-dev-harness:developer";
@@ -80,13 +92,13 @@ const MCP_WRITE_VERB = /^mcp__.+__(create|edit|update|delete|remove|upload|add|s
 
 // The plan store as it appears in paths or shell commands, in any slash style.
 const STORE_REF = /plugins[\\/]+data[\\/]+jira-dev-harness/i;
-const PROTECTED_NAMES = /approval-r[0-9]+|plan-r[0-9]+\.(md|json)|impl-r[0-9]+-[0-9]+\.(md|json)|review-rv-[0-9]+|review-approval-rv-[0-9]+|ship-rv-[0-9]+|merge-rv-[0-9]+|ledger.jsonl|facts\.json|approval\.key|JDH-WORKFLOW-SESSION/i;
+const PROTECTED_NAMES = /approval-r[0-9]+|plan-r[0-9]+\.(md|json)|impl-r[0-9]+-[0-9]+\.(md|json)|review-rv-[0-9]+|review-approval-rv-[0-9]+|ship-rv-[0-9]+|ship-commit-rv-[0-9]+|merge-rv-[0-9]+|ledger.jsonl|facts\.json|approval\.key|worktree-b[0-9]+|empty-hooks|removal-previews|JDH-WORKFLOW-SESSION/i;
 // The only plan-store invocations Claude may run. session-start,
 // implement-start, review-start, and approve are reserved for user-only skills.
 const PLAN_STORE_SCRIPT = String.raw`node\s+("[^"]*[\\/]scripts[\\/]plan-store\.cjs"|'[^']*[\\/]scripts[\\/]plan-store\.cjs'|\S*[\\/]scripts[\\/]plan-store\.cjs)\s+`;
-const PLAN_STORE_CALL = new RegExp(`^${PLAN_STORE_SCRIPT}(draft-path|save|report-save|review-save|review-status|status|verify|attach-dir|clean-attach|ship-prepare-pr|ship-record-pr|ship-status|ship-checks|merge-collect|merge-verify|merge-record|merge-status|mapping-check|jira-plan|jira-confirm|jira-status|jira-ledger)\\b`);
+const PLAN_STORE_CALL = new RegExp(`^${PLAN_STORE_SCRIPT}(draft-path|save|report-save|review-save|review-status|status|verify|attach-dir|clean-attach|ship-prepare-pr|ship-record-pr|ship-status|ship-checks|merge-collect|merge-verify|merge-record|merge-status|mapping-check|ticket-ref|assigned-jql|mapping-status|worktree-status|jira-plan|jira-confirm|jira-status|jira-ledger)\\b`);
 // approve-review and ship-start are reserved too: "approve" matches before the hyphen.
-const RESERVED_STORE_CMD = /(plan-store(\.cjs)?["']?\s+(approve|session-start|implement-start|review-start|ship-start|merge-start|jira-start)|scripts[\\/]connect(\.cjs)?["']?\s+(begin|evaluate))\b/;
+const RESERVED_STORE_CMD = /(plan-store(\.cjs)?["']?\s+(approve|session-start|implement-start|review-start|ship-start|merge-start|jira-start|worktree-remove)|scripts[\\/]connect(\.cjs)?["']?\s+(begin|evaluate))\b/;
 // The read-only connection report of /jira-dev-harness:connect. It names the
 // plugin data directory (to read the developer's confirmation), so it is
 // allowed only as a single command with that exact directory. `begin`, which
@@ -103,7 +115,7 @@ const RUN_CHECK = new RegExp(`^${PLAN_STORE_SCRIPT}run-check\\s+"[^"]+"\\s+[0-9a
 
 // Git commands that change repository, index, or remote state, and
 // code-hosting CLIs (PR creation and similar are later phases).
-const GIT_MUTATION = /^git(\s+(-C\s+\S+|-c\s+\S+|--no-pager))*\s+(add|am|apply|branch\s+-[dDmMcC]|checkout|cherry-pick|clean|commit|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|worktree|update-ref|fetch|notes|submodule|config(?!\s+--get))\b/;
+const GIT_MUTATION = /^git(\s+(-C\s+("[^"]*"|'[^']*'|\S+)|-c\s+\S+|--no-pager))*\s+(add|am|apply|branch\s+-[dDmMcC]|checkout|cherry-pick|clean|commit|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch|tag|worktree|update-ref|fetch|notes|submodule|config(?!\s+--get))\b/;
 const HOSTING_CLI = /^(gh|glab|hub|az\s+repos)\b/;
 
 // Project instruction files. Writable by the Developer only when the approved
@@ -142,9 +154,11 @@ function normalize(p) {
 // A plan-store call must name this plugin's own data directory. Otherwise
 // Claude could point a ship or merge step at a store it forged elsewhere,
 // with its own key and approval records.
-const NO_STORE_ARG = new Set(["draft-path", "attach-dir", "clean-attach", "mapping-check"]);
+const NO_STORE_ARG = new Set(["draft-path", "attach-dir", "clean-attach", "mapping-check", "ticket-ref", "assigned-jql", "mapping-status"]);
 function storeArgPinned(seg) {
-  const m = /^node\s+(?:"[^"]*"|'[^']*'|\S+)\s+([a-z-]+)\s+("[^"]*"|'[^']*'|\S+)/.exec(String(seg).trim());
+  const bare = /^node\s+(?:"[^"]*"|'[^']*'|\S+)\s+([a-z-]+)\s*$/.exec(String(seg).trim());
+  if (bare && NO_STORE_ARG.has(bare[1])) return true;
+  const m =/^node\s+(?:"[^"]*"|'[^']*'|\S+)\s+([a-z-]+)\s+("[^"]*"|'[^']*'|\S+)/.exec(String(seg).trim());
   if (!m) return false;
   if (NO_STORE_ARG.has(m[1])) return true;
   const dataDir = process.env.CLAUDE_PLUGIN_DATA;
@@ -221,16 +235,23 @@ function developerTargetProblem(state, target) {
   if (!target) return "no file path given";
   const real = realTarget(target);
   if (real === null) return `refusing to write through a symbolic link: ${target}`;
+  // Phase 8C: the Developer writes only in the session's ticket worktree.
+  const workRoot = state.worktree.path;
   let root;
   try {
-    root = fs.realpathSync.native(state.repo.root);
+    root = fs.realpathSync.native(workRoot);
   } catch {
-    return "the approved repository no longer exists";
+    return "the ticket worktree no longer exists";
+  }
+  let mainRoot = null;
+  try { mainRoot = fs.realpathSync.native(state.repo.root); } catch { mainRoot = null; }
+  if (mainRoot && relInside(mainRoot, real) !== null) {
+    return `${target} is in the main checkout ${state.repo.root}, which implementation never changes. The Developer works only in the ticket worktree ${workRoot}`;
   }
   const rel = relInside(root, real);
-  if (rel === null || rel === "") return `${target} is outside the approved repository ${state.repo.root}`;
+  if (rel === null || rel === "") return `${target} is outside the ticket worktree ${workRoot}`;
   if (relInside(root, path.resolve(String(target))) === null && !/^\/[a-z]\//i.test(String(target))) {
-    return `${target} is outside the approved repository ${state.repo.root}`;
+    return `${target} is outside the ticket worktree ${workRoot}`;
   }
   const parts = rel.split("/");
   if (parts.includes(".git")) return "the .git directory may not be modified";
@@ -323,7 +344,7 @@ function splitShell(command) {
 
 // Read-only shell allowlist for workflow sessions. `git -c` is excluded
 // because config overrides (core.pager, aliases) can run arbitrary commands.
-const READ_ONLY_GIT = /^git(\s+(-C\s+\S+|--no-pager))*\s+(rev-parse|status|ls-files|log|diff|show|rev-list|describe|blame|cat-file|ls-tree|branch\s+--show-current|branch(\s+(-a|-r|-v|-vv|--list))*$|config\s+--get(-all)?\s|remote(\s+-v)?$|remote\s+get-url\s)/;
+const READ_ONLY_GIT = /^git(\s+(-C\s+("[^"]*"|'[^']*'|\S+)|--no-pager))*\s+(rev-parse|status|ls-files|log|diff|show|rev-list|describe|blame|cat-file|ls-tree|branch\s+--show-current|branch(\s+(-a|-r|-v|-vv|--list))*$|config\s+--get(-all)?\s|remote(\s+-v)?$|remote\s+get-url\s)/;
 const SAFE_SEGMENTS = [
   /^cd(\s+.+)?$/,
   /^(pwd|ls|dir)(\s+.*)?$/,
@@ -361,10 +382,111 @@ function shellAllowedInWorkflow(command) {
   return null;
 }
 
+// Phase 8C: a Developer command must begin by entering the ticket worktree,
+// as `cd "<worktree>" && ...` (or `Set-Location` / `;` in PowerShell), and
+// must not change directory or point git elsewhere afterwards. The shell
+// starts in the session directory (the main checkout) on every call, and the
+// hook's `cwd` does not follow a `cd`, so the prefix is what is checked.
+// This decides where a command starts; it does not confine what an approved
+// command can reach (see README "Security model").
+const WORKTREE_PREFIX = /^\s*(?:cd|Set-Location|chdir)(?:\s+-(?:LiteralPath|Path))?\s+("[^"]*"|'[^']*'|[^\s;&|"']+)\s*(&&|;)\s*(\S[\s\S]*)$/i;
+const CHANGES_DIRECTORY = /(^|[\s;&|(])(cd|pushd|popd|chdir|Set-Location|Push-Location|Pop-Location)(\s|$|;)/i;
+const REDIRECTS_GIT = /--git-dir\b|--work-tree\b|\bGIT_DIR\b|\bGIT_WORK_TREE\b|\bGIT_COMMON_DIR\b|(^|[\s;&|(])git(\s+(-c\s+\S+|--no-pager))*\s+-C\b/i;
+
+function worktreePrefixProblem(command, worktree) {
+  const m = WORKTREE_PREFIX.exec(command);
+  const example = `cd "${worktree}" && <command>`;
+  if (!m || normalize(m[1]) !== normalize(worktree)) {
+    return `every Developer shell command must start in the ticket worktree, as: ${example}. The main checkout and other directories are off limits during implementation.`;
+  }
+  if (CHANGES_DIRECTORY.test(m[3])) return `a Developer command may not change directory again after entering the worktree. Use: ${example}`;
+  if (REDIRECTS_GIT.test(m[3])) return "a Developer command may not point git at another directory or repository (-C, --git-dir, --work-tree, GIT_DIR).";
+  return null;
+}
+
+// Plugin-managed worktrees, protected in every session (rule 1b). A command
+// is refused when it removes, moves, or repairs a registered worktree through
+// git, or recursively deletes one or a directory containing one. Paths are
+// compared after resolving them against the session directory, and by
+// directory name, so relative and differently-slashed forms are covered.
+function shellWords(text) {
+  const out = [];
+  const re = /"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(text))) out.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+  return out;
+}
+
+function resolveAt(base, word) {
+  const w = String(word);
+  if (path.isAbsolute(w) || /^\/[a-z](\/|$)/i.test(w) || /^\/tmp(\/|$)/i.test(w)) return normalize(w);
+  return normalize(path.join(base || process.cwd(), w));
+}
+
+function globRegex(word) {
+  const esc = word.replace(/\\/g, "/").toLowerCase().replace(/[.+^${}()|]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]");
+  return new RegExp(`(^|/)${esc}$`);
+}
+
+function managedWorktreeProblem(command, cwd) {
+  let regs = [];
+  try {
+    regs = W.registeredPaths(process.env.CLAUDE_PLUGIN_DATA || "");
+  } catch {
+    regs = [];
+  }
+  if (!regs.length) return null;
+  const managed = regs.map((r) => ({ ...r, norm: normalize(r.path), name: path.posix.basename(normalize(r.path)) }));
+  const segments = splitShell(command) || command.split(/&&|\|\||;|\||\r?\n/);
+  let base = cwd;
+  for (const seg of segments) {
+    const words = shellWords(seg.trim());
+    if (!words.length) continue;
+    const head = words[0].toLowerCase().replace(/\.exe$/, "");
+    // Relative paths after a `cd` are resolved against that directory.
+    if (["cd", "chdir", "set-location", "pushd", "push-location", "sl"].includes(head)) {
+      const dest = words.slice(1).find((w) => !w.startsWith("-"));
+      if (dest) base = resolveAt(base, dest);
+      continue;
+    }
+    let targets = null;
+    const wi = words.findIndex((w) => w === "worktree");
+    if (head === "git" && wi > 0 && /^(remove|move|prune|repair)$/.test(words[wi + 1] || "")) {
+      const sub = words[wi + 1];
+      if (sub === "prune") {
+        const missing = managed.filter((r) => !fs.existsSync(r.path));
+        if (missing.length) return `git worktree prune would drop the plugin-managed worktree ${missing[0].path} (its directory is missing). Ask the developer to inspect it.`;
+        continue;
+      }
+      targets = words.slice(wi + 2).filter((w) => !w.startsWith("-"));
+    } else if ((head === "rm" && words.some((w) => /^-[a-zA-Z]*[rR]/.test(w) || w === "--recursive"))
+      || (["rmdir", "rd", "del", "erase"].includes(head) && words.some((w) => /^\/s$/i.test(w)))
+      || (["remove-item", "ri", "rm", "del", "rmdir"].includes(head) && words.some((w) => /^-r(e(c(u(r(s(e)?)?)?)?)?)?$/i.test(w)))) {
+      targets = words.slice(1).filter((w) => !/^-/.test(w) && !/^\/[a-z]$/i.test(w));
+    }
+    if (!targets) continue;
+    for (const w of targets) {
+      const resolved = resolveAt(base, w);
+      const glob = /[*?]/.test(w) ? globRegex(resolved.replace(/^.*\//, "")) : null;
+      for (const r of managed) {
+        const hit = resolved === r.norm || r.norm.startsWith(`${resolved.replace(/\/$/, "")}/`)
+          || path.posix.basename(normalize(w)) === r.name
+          || (glob && glob.test(r.name));
+        if (hit) {
+          return `${r.path} is the plugin-managed worktree of ${r.issueKey}. It is never removed, moved, or deleted by Claude; ignored files such as .env and dependencies would be lost. Removal will be a separate developer-run command.`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // The Developer's shell policy: never git state changes or hosting CLIs;
 // read-only commands follow the normal flow; anything else is a project
 // command that the developer must authorize interactively.
-function developerShell(command) {
+function developerShell(command, state) {
+  const prefix = worktreePrefixProblem(command, state.worktree.path);
+  if (prefix) deny(prefix);
   const segments = splitShell(command);
   const parts = segments || command.split(/&&|\|\||;|\||\r?\n/).map((s) => s.trim()).filter(Boolean);
   for (const seg of parts) {
@@ -374,7 +496,7 @@ function developerShell(command) {
     }
   }
   if (segments && segments.every(readOnlySegment)) allow();
-  ask(`the Developer Agent wants to run a project command. Approve only if you trust this command and it is an appropriate check for the approved plan: ${command.slice(0, 200)}`);
+  ask(`the Developer Agent wants to run a project command in the ticket worktree ${state.worktree.path}. The command can still reach files outside it, so approve only if you trust this command and it is an appropriate check for the approved plan: ${command.slice(0, 200)}`);
 }
 
 let raw = "";
@@ -415,6 +537,12 @@ process.stdin.on("end", () => {
     }
   }
 
+  // 1b. Plugin-managed worktrees are protected in every session.
+  if (command) {
+    const managed = managedWorktreeProblem(command, input.cwd);
+    if (managed) deny(managed);
+  }
+
   let state = null;
   try {
     state = workflowState(input);
@@ -433,7 +561,9 @@ process.stdin.on("end", () => {
     }
     const problem = L.implementationProblem(process.env.CLAUDE_PLUGIN_DATA, state);
     if (problem) deny(`implementation is no longer authorized: ${problem}`);
-    if (command) developerShell(command);
+    const wtProblem = W.sessionWorktreeProblem(process.env.CLAUDE_PLUGIN_DATA, state);
+    if (wtProblem) deny(`implementation is not authorized: ${wtProblem}`);
+    if (command) developerShell(command, state);
     const targetProblem = developerTargetProblem(state, target);
     if (targetProblem) deny(targetProblem);
     ask(`Developer Agent edit for ${state.issueKey} r${state.revision} (approved plan). Review the change before allowing it: ${target}`);
@@ -495,6 +625,11 @@ process.stdin.on("end", () => {
     }
     const bad = P.mcpCreatePrProblem(state, toolInput);
     if (bad) deny(`pull request creation refused: ${bad}.`);
+    // The whole chain again, right before the provider write: plan, review,
+    // the developer's review approval, the signed worktree binding, branch,
+    // the shipping commit's content, and the authorized remote.
+    const chain = S.committedProblem(process.env.CLAUDE_PLUGIN_DATA, state);
+    if (chain) deny(`pull request creation refused: ${chain}.`);
     ask(`create a pull request for ${state.issueKey}: ${state.branch} into ${state.base} on ${state.remote.owner}/${state.remote.name}, with the prepared title and body. It will not be merged.`);
   }
   const jiraKind = JG.classifyCall(tool, toolInput);

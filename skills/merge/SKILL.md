@@ -21,7 +21,10 @@ with no `cd` prefix and no chaining.
 ## Hard limits
 
 - **REFUSED:** if the verdict above says `MERGE: REFUSED`, report the
-  reason and stop.
+  reason and stop. For a ticket shipped from its worktree, the ship record
+  is bound to the signed worktree binding and to the developer's exact
+  review approval; if either changed, or the worktree is missing or moved,
+  the merge is refused and never checked against the main checkout instead.
 - **Your summary is not evidence.** Whether a merge is allowed is decided
   only by raw responses from the GitHub provider, which a hook records from
   your MCP read tools, or which the plugin fetches itself with the official

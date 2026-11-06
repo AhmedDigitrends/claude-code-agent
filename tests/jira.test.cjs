@@ -18,7 +18,7 @@ const JM = require("../scripts/lib/jira-mapping.cjs");
 const PR = require("../scripts/lib/progress.cjs");
 const M = require("../scripts/lib/merge.cjs");
 const L = require("../scripts/lib/approval.cjs");
-const { ROOT, SITE, KEY, uuid, git, draft, makeFixture, reviewed, guard } = require("./helpers.cjs");
+const { ROOT, SITE, KEY, uuid, git, draft, makeFixture, legacyImplement, reviewed, guard } = require("./helpers.cjs");
 
 const EVIDENCE = path.join(ROOT, "scripts", "evidence.cjs");
 const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
@@ -291,7 +291,7 @@ test("stages follow the plugin's own signed records, from planning to merged", (
   const hash = /SHA-256: ([0-9a-f]{64})/.exec(f.run(["status", f.data, KEY]).out)[1];
   f.run(["approve", f.data, f.sid("plan"), KEY, "r2", hash]);
   assert.equal(stage(), "implementing");
-  f.run(["implement-start", f.data, f.sid("impl"), KEY, "r2", hash]);
+  legacyImplement(f, "impl", KEY, 2, hash); // in place, as before Phase 8C (review is not on worktrees yet)
   fs.writeFileSync(path.join(f.repo, "src", "app.js"), "module.exports = 2;\n");
   f.run(["report-save", f.data, f.sid("impl"), draft(f, "report", `Report ${KEY}\n`)]);
   assert.equal(stage(), "implementing");
@@ -475,7 +475,12 @@ test("end to end: plan, guarded writes, executed and failed hooks, confirmation,
     assert.match(ledger, re);
   }
   assert.ok(!/ghp_aaaaaaaaaaaaaaaa/.test(ledger), "tokens are redacted from the audit trail");
-  assert.match(f.run(["jira-status", f.data, sid]).out, /Audit ledger: intact/);
+  const st = f.run(["jira-status", f.data, sid]).out;
+  assert.match(st, /Audit ledger: intact/);
+  // Regression: the header reflects the ledger, not the stale "planned" phase.
+  assert.match(st, /stage "awaiting-review-approval", attention needed \(see the writes below\)/);
+  assert.match(st, /Planned writes: transition confirmed, comment (failed|blocked)/);
+  assert.doesNotMatch(st, /, phase planned$/m);
 });
 
 test("a duplicate sync is detected from Jira and from the audit trail", () => {

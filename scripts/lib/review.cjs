@@ -12,6 +12,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const L = require("./approval.cjs");
+const W = require("./worktree.cjs");
 
 const { fail } = L;
 const CHECK_NAME_RE = /^[A-Za-z0-9_.-]{1,40}$/;
@@ -131,6 +132,149 @@ function findReview(t, id) {
   return fs.existsSync(file) ? { id, file, data: L.readJson(file) } : null;
 }
 
+// ------------------------------------------------------------ workspace
+//
+// Phase 8C: the code under review lives either in the ticket's verified
+// sibling worktree, or (only for implementations made by plugin versions
+// before Phase 8C) in the main checkout. Which one is never guessed from a
+// missing binding: an implementation report says it explicitly, and a report
+// or review that names a worktree is resolved only through the ticket's
+// current signed binding. It never falls back to the main checkout.
+
+const LEGACY = "legacy-in-place";
+
+// The layout an implementation report describes. Reports written from Phase
+// 8C step 4 on carry `layout`; a report with neither `layout` nor `worktree`
+// was written by an older version, in place.
+function reportLayout(meta) {
+  if (!meta) return null;
+  if (meta.layout === "worktree" || meta.worktree) return "worktree";
+  if (meta.layout === LEGACY) return LEGACY;
+  if (meta.layout === undefined) return LEGACY;
+  return null;
+}
+
+// Re-verifies a recorded worktree workspace against the ticket's signed
+// binding and git. Returns the verified worktree root, or throws.
+function verifiedWorktreeRoot(dataDir, t, ws, repo) {
+  if (!ws || !ws.path || !Number.isInteger(ws.binding) || !/^[0-9a-f]{64}$/.test(ws.bindingHmac || "")) {
+    fail("the record names a ticket worktree but does not identify its signed binding; run /jira-dev-harness:implement again");
+  }
+  const active = W.activeBinding(dataDir, t.site, t.key);
+  if (!active) fail(`the ticket worktree's binding (worktree-b${ws.binding}.json) is missing; the review never falls back to the main checkout`);
+  if (active.n !== ws.binding || !active.record || active.record.hmac !== ws.bindingHmac) {
+    fail(`the ticket worktree's binding changed (expected worktree-b${ws.binding}.json as recorded); run /jira-dev-harness:implement again`);
+  }
+  const { binding, problems } = W.verify(dataDir, t.site, t.key, repo.root);
+  if (problems.length) fail(`the ticket worktree failed verification: ${problems.join("; ")}`);
+  if (!W.samePath(binding.path, ws.path)) fail(`the ticket worktree is at ${binding.path}, not at the recorded ${ws.path}`);
+  return binding.path;
+}
+
+// The workspace an implementation report describes, verified now.
+// Returns { kind, root, record }, where `record` is what review records bind.
+// A ticket that has ever had a plugin-managed worktree never uses the
+// in-place path again, whatever an older record says.
+function legacyAllowed(dataDir, t) {
+  if (W.hasWorktreeHistory(dataDir, t.site, t.key)) {
+    fail(`${t.key} has a plugin-managed worktree (or had one), so an in-place (legacy) record can't be used for it; implement it again in its worktree`);
+  }
+}
+
+function resolveWorkspace(dataDir, t, meta, repo) {
+  const layout = reportLayout(meta);
+  if (layout === LEGACY) {
+    legacyAllowed(dataDir, t);
+    return { kind: LEGACY, root: repo.root, record: { kind: LEGACY, path: repo.root } };
+  }
+  if (layout !== "worktree") fail("the implementation report does not say where the work is; run /jira-dev-harness:implement again");
+  const w = meta.worktree || {};
+  const root = verifiedWorktreeRoot(dataDir, t, w, repo);
+  return {
+    kind: "worktree",
+    root,
+    record: { kind: "worktree", path: root, branch: w.branch, baseHead: w.baseHead, binding: w.binding, bindingHmac: w.bindingHmac },
+  };
+}
+
+// The root of a workspace recorded in a review or review approval, verified
+// now. A review saved before Phase 8C step 4 has no workspace and was made in
+// place, in the main checkout.
+function recordedWorkspaceRoot(dataDir, t, ws, repo) {
+  if (!ws || ws.kind === LEGACY) {
+    legacyAllowed(dataDir, t);
+    return repo.root;
+  }
+  if (ws.kind !== "worktree") fail(`unknown workspace kind "${ws.kind}"`);
+  return verifiedWorktreeRoot(dataDir, t, ws, repo);
+}
+
+// Like recordedWorkspaceRoot, but when `allowRemoved` is set, a worktree whose
+// exact recorded binding was closed by a valid signed removal record is
+// accepted with { root: null, removal }. Used only where no workspace content
+// is read (merge verification); the caller must check the removal against its
+// own evidence. A removal record never approves anything.
+function recordedWorkspace(dataDir, t, ws, repo, { allowRemoved = false } = {}) {
+  if (allowRemoved && ws && ws.kind === "worktree" && !W.activeBinding(dataDir, t.site, t.key)) {
+    const rem = W.removedBinding(dataDir, t.site, t.key);
+    if (rem) {
+      if (!rem.valid) fail("the ticket worktree's removal record or binding does not verify (edited or forged)");
+      if (rem.n !== ws.binding || rem.binding.hmac !== ws.bindingHmac || !W.samePath(rem.removal.path, ws.path) || rem.removal.branch !== ws.branch || rem.removal.baseHead !== ws.baseHead) {
+        fail("the removed worktree is not the recorded one (binding, path, branch, or base differ)");
+      }
+      return { root: null, removal: rem.removal };
+    }
+  }
+  return { root: recordedWorkspaceRoot(dataDir, t, ws, repo), removal: null };
+}
+
+function sameWorkspace(a, b) {
+  const kind = (w) => (w ? w.kind : LEGACY);
+  if (kind(a) !== kind(b)) return false;
+  if (kind(a) === LEGACY) return true;
+  return W.samePath(a.path, b.path) && a.binding === b.binding && a.bindingHmac === b.bindingHmac
+    && a.branch === b.branch && a.baseHead === b.baseHead;
+}
+
+// The signed shipping commits made in a ticket worktree (ship.cjs writes
+// them when it commits): commit -> parent.
+function authorizedShipCommits(dataDir, t, workspace) {
+  const dir = reviewsDir(t);
+  const out = new Map();
+  if (!fs.existsSync(dir)) return out;
+  const key = L.approvalKey(dataDir, false);
+  for (const f of fs.readdirSync(dir).filter((n) => /^ship-commit-rv-[0-9]+(-[0-9]+)?\.json$/.test(n))) {
+    const r = L.readJson(path.join(dir, f));
+    if (r && r.kind === "ship-commit" && L.signatureValid(r, key) && r.issueKey === t.key && r.site === t.site
+        && sameWorkspace(r.workspace, workspace)) {
+      out.set(r.commit, r.parent);
+    }
+  }
+  return out;
+}
+
+// Null when every commit on the ticket branch between the approved base and
+// HEAD is a signed shipping commit of this worktree (with its recorded
+// parent); otherwise the reason. Any other commit is unreviewed work.
+function unexpectedCommitsProblem(dataDir, t, ws, root, head) {
+  const shipped = authorizedShipCommits(dataDir, t, ws);
+  let h = head;
+  for (let i = 0; i < 1000 && h !== ws.baseHead; i += 1) {
+    const parent = shipped.get(h);
+    const actual = L.git(["rev-parse", `${h}^`], root);
+    if (!parent || parent !== actual) {
+      return `the ticket branch has a commit (${h.slice(0, 12)}) since the approved base ${ws.baseHead} that is not an authorized shipping commit; only uncommitted work can be reviewed`;
+    }
+    h = parent;
+  }
+  return h === ws.baseHead ? null : "the ticket branch history could not be traced back to the approved base";
+}
+
+function describeWorkspace(ws) {
+  if (!ws || ws.kind === LEGACY) return `main checkout (legacy in-place implementation)${ws ? `: ${ws.path}` : ""}`;
+  return `ticket worktree ${ws.path} (branch ${ws.branch}, base ${ws.baseHead}, binding worktree-b${ws.binding})`;
+}
+
 // ---------------------------------------------------------- review start
 
 // Verifies that the latest revision is approved and implemented in this
@@ -142,8 +286,13 @@ function startReview(dataDir, ref, cwd) {
   if (!report) fail(`r${s.n} has no implementation report yet. Run /jira-dev-harness:implement first.`);
 
   const planText = fs.readFileSync(s.planFile, "utf8");
-  const identity = treeIdentity(repo.root);
-  const baseline = new Set(report.meta.preExistingChanges || []);
+  const ws = resolveWorkspace(dataDir, t, report.meta, repo);
+  const identity = treeIdentity(ws.root);
+  // In a ticket worktree, everything since the approved base is ticket work
+  // (including an earlier attempt's changes). In place, the developer's own
+  // pre-existing changes are excluded, as before.
+  const preExisting = ws.kind === "worktree" ? [] : (report.meta.preExistingChanges || []);
+  const baseline = new Set(preExisting);
   const changedNow = identity.status.filter((l) => !baseline.has(l));
   const changedPaths = [...new Set(changedNow.map(pathOf))].sort();
   const planned = plannedFiles(planText).map((p) => p.toLowerCase());
@@ -152,6 +301,17 @@ function startReview(dataDir, ref, cwd) {
   const instructionChanges = changedPaths.filter((p) => INSTRUCTION_FILE.test(p))
     .map((p) => ({ path: p, approvedInPlan: approvedRules.includes(p.toLowerCase()) }));
   const differences = treeDifferences(report.meta, identity);
+  if (ws.kind === "worktree" && identity.head !== ws.record.baseHead) {
+    // The authorized shipping commit (and any later one) may advance HEAD;
+    // nothing else may.
+    let problem;
+    try {
+      problem = unexpectedCommitsProblem(dataDir, t, ws.record, ws.root, identity.head);
+    } catch (e) {
+      problem = `the ticket branch history could not be checked: ${e.message}`;
+    }
+    if (problem) differences.push(problem);
+  }
 
   const dir = reviewsDir(t);
   fs.mkdirSync(dir, { recursive: true });
@@ -168,7 +328,7 @@ function startReview(dataDir, ref, cwd) {
     }
   }
   fs.mkdirSync(path.join(bundle, "checks"));
-  const diffText = L.git(["diff", "HEAD"], repo.root, { binary: true });
+  const diffText = L.git(["diff", "HEAD"], ws.root, { binary: true });
   fs.writeFileSync(path.join(bundle, "diff.patch"), redact(diffText.toString("utf8")), { flag: "wx" });
   const facts = {
     reviewId: `rv-${n}`,
@@ -180,9 +340,10 @@ function startReview(dataDir, ref, cwd) {
     approvalFile: path.join(t.dir, `approval-r${s.n}.json`).replace(/\\/g, "/"),
     implementationReport: { id: report.id, file: report.md.replace(/\\/g, "/"), intact: report.intact, meta: report.meta },
     repo,
+    workspace: ws.record,
     identityAtStart: identity,
     integrity: { matchesImplementationReport: report.intact && differences.length === 0, differences: report.intact ? differences : ["the implementation report file was modified after it was saved", ...differences] },
-    preExistingChanges: report.meta.preExistingChanges || [],
+    preExistingChanges: preExisting,
     changedSinceAuthorization: changedNow,
     changedFiles: changedPaths,
     plannedFiles: plannedFiles(planText),
@@ -204,6 +365,7 @@ function startReview(dataDir, ref, cwd) {
       sha256: s.actualHash,
       planFile: facts.planFile,
       repo,
+      workspace: ws.record,
       reviewId: facts.reviewId,
       reviewBundle: bundle.replace(/\\/g, "/"),
     },
@@ -227,17 +389,26 @@ function truncateLog(text) {
   };
 }
 
-// Runs one project command in the repository root for a reviewing session
-// and records it as immutable evidence. The guard makes Claude Code ask the
+// The verified root of a reviewing session's workspace: the ticket worktree,
+// re-verified now, or the main checkout for an in-place review. A session
+// started before Phase 8C step 4 has no workspace and reviews in place.
+function sessionWorkspaceRoot(dataDir, state) {
+  const t = L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`);
+  return recordedWorkspaceRoot(dataDir, t, state.workspace, state.repo);
+}
+
+// Runs one project command in the reviewed workspace (the ticket worktree,
+// or the main checkout for an in-place review) for a reviewing session and
+// records it as immutable evidence. The guard makes Claude Code ask the
 // developer before every invocation.
-function runCheck(state, name, required, command) {
+function runCheck(dataDir, state, name, required, command) {
   if (!state || state.mode !== "reviewing") fail("checks can only be recorded in a review session started with /jira-dev-harness:review");
   if (!CHECK_NAME_RE.test(name || "")) fail(`invalid check name: ${name}`);
   if (!["required", "optional"].includes(required)) fail('the fourth argument must be "required" or "optional"');
   if (!command || !command.trim()) fail("no command given");
   const checksDir = path.join(state.reviewBundle, "checks");
   if (!fs.existsSync(checksDir)) fail("the review bundle is missing");
-  const root = state.repo.root;
+  const root = sessionWorkspaceRoot(dataDir, state);
   const before = treeIdentity(root);
   const started = Date.now();
   const r = spawnSync(command, { cwd: root, shell: true, encoding: "utf8", timeout: CHECK_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: true });
@@ -263,6 +434,7 @@ function runCheck(state, name, required, command) {
     required: required === "required",
     command: redact(command),
     cwd: root,
+    workspace: state.workspace ? state.workspace.kind : LEGACY,
     startedAt: new Date(started).toISOString(),
     durationMs,
     exitCode,
@@ -472,6 +644,11 @@ function reviewStatus(dataDir, ref, cwd) {
   if (!latest || !latest.data) return { t, latest: null, valid: false, reasons: ["no saved review"] };
   const d = latest.data;
   const reasons = [];
+  // An unsigned or edited record could name another workspace; nothing in it
+  // is used as a fact then (it would otherwise be compared with the wrong tree).
+  if (!L.signatureValid(d, L.approvalKey(dataDir, false))) {
+    return { t, latest, valid: false, reasons: ["the review record has no valid signature (edited, forged, or saved before Phase 6); run /jira-dev-harness:review again"] };
+  }
   const s = L.latestState(t);
   if (!s || s.n !== d.identity.planRevision || s.actualHash !== d.identity.planSha256) reasons.push("the plan has a newer revision than the one reviewed");
   const report = s ? latestReport(t, s.n) : null;
@@ -484,14 +661,24 @@ function reviewStatus(dataDir, ref, cwd) {
   }
   if (repo && !L.sameRepo(repo, d.identity.repo)) reasons.push("this is not the reviewed repository");
   if (repo && L.sameRepo(repo, d.identity.repo)) {
-    const now = treeIdentity(repo.root);
-    if (!sameTree(d.identity.tree, now)) reasons.push(`the code changed after the review (${treeDifferences(d.identity.tree, now).join("; ")})`);
+    let root = null;
+    try {
+      root = recordedWorkspaceRoot(dataDir, t, d.identity.workspace, repo);
+    } catch (e) {
+      reasons.push(e.message);
+    }
+    if (root) {
+      const now = treeIdentity(root);
+      if (!sameTree(d.identity.tree, now)) reasons.push(`the code changed after the review (${treeDifferences(d.identity.tree, now).join("; ")})`);
+    }
   }
   return { t, latest, valid: reasons.length === 0, reasons };
 }
 
 module.exports = {
-  redact, treeIdentity, sameTree, treeDifferences, plannedFiles, approvedRuleFiles,
+  redact, treeIdentity, sameTree, treeDifferences, plannedFiles, approvedRuleFiles, sectionText: section,
   latestReport, latestReview, findReview, reviewsDir, startReview, runCheck, loadChecks, enforce, reviewStatus,
+  LEGACY, reportLayout, resolveWorkspace, recordedWorkspaceRoot, recordedWorkspace, sessionWorkspaceRoot, sameWorkspace, describeWorkspace,
+  authorizedShipCommits, unexpectedCommitsProblem,
   VERDICTS, TC_STATUSES,
 };

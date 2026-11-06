@@ -76,6 +76,8 @@ is planned for Phase 8.
 ```text
 /jira-dev-harness:connect                                                     # once: verify your own Jira and GitHub connections
 /jira-dev-harness:ticket https://<your-site>.atlassian.net/browse/PROJ-123   # analyse and plan
+/jira-dev-harness:ticket                                                      # or: list the tickets assigned to you, then pick one
+/jira-dev-harness:ticket PROJ-123                                             # or: a bare key (site from the repository mapping)
 /jira-dev-harness:approve PROJ-123 r1 <full SHA-256>                          # approve one revision
 /jira-dev-harness:implement PROJ-123 r1 <full SHA-256>                        # attended implementation
 /jira-dev-harness:review PROJ-123                                             # independent review + test report
@@ -89,8 +91,24 @@ Only you can start these commands. Claude cannot invoke any of them.
 
 ### 1. Plan: `/jira-dev-harness:ticket`
 
-1. **Checks the ticket URL.** It must be an `https://<site>.atlassian.net`
-   ticket URL.
+**Choosing the ticket.** Give a ticket URL or key, or give nothing to list
+your own tickets. With no argument, the workflow searches every Jira site
+your connection can reach with the single fixed query
+`assignee = currentUser() AND statusCategory != Done` (ask for finished
+tickets too to drop the second clause). It shows a numbered list of key,
+summary, project, status, and whether the repository's mapping covers the
+ticket (`verified`, `mismatch`, or `unverified`), then stops. Only your own
+reply selects a ticket: a number from the list, or any URL or key. It never
+picks for you, even when one ticket is listed, and nothing in a ticket's text
+can select one. Listing reads only those four fields; the description,
+comments, and attachments are read after the mapping is verified. Selecting
+a ticket then runs the steps below with every gate unchanged. Discovery is
+read-only and cannot create, edit, or delete anything in Jira.
+
+1. **Checks the ticket reference.** A URL must be an
+   `https://<site>.atlassian.net` ticket URL. A bare key takes its site from
+   the repository's mapping; if that names no site, the workflow uses the one
+   accessible Jira site or asks you which one, and never guesses.
 2. **Checks the repository and its mapping.** It finds the git root, the
    branch, the HEAD commit, and whether the working tree is clean. It
    identifies the technology stack from the manifests that are actually
@@ -170,27 +188,56 @@ the repository the plan was made for.
 
 ### 3. Implement: `/jira-dev-harness:implement`
 
-Run this in an **attended** Claude Code session, in the default permission
-mode, not auto-accept or bypass. An injected command first re-verifies:
+Run this from your main checkout in an **attended** Claude Code session,
+in the default permission mode, not auto-accept or bypass. An injected
+command first re-verifies:
 
 - the repository identity and the mapping
 - the issue key and the latest READY revision
-- the full SHA-256 and the signed approval
+- the full SHA-256 and the signed approval, including its base commit
 
-Only then is the session switched to *implementing*, recording a baseline
-of HEAD and your pre-existing uncommitted changes. Then:
+**Each ticket gets its own sibling git worktree (Phase 8C).** For a main
+checkout at `React/jadwa`, ticket `JAD-101` is implemented in
+`React/jadwa-JAD-101` on branch `jira/JAD-101`, created from the approved
+base commit. Your main checkout is never changed. There is no central
+worktrees folder.
 
-- **Only the Developer Agent writes.** That is `jira-dev-harness:developer`,
-  on Sonnet. The main conversation and every other agent stay read-only.
+- **First run:** the plugin creates the worktree and stops. Repository
+  hooks don't run during creation; your own configured checkout filters
+  (for example Git LFS) do, and are reported. Uncommitted changes in your
+  main checkout that touch the plan's files block creation (commit or stash
+  them first); other changes are listed and stay where they are. Ignored
+  files such as `node_modules/` or `.env` are reported as missing in the
+  worktree and are never copied or installed by the plugin.
+- **Give Claude Code access:** type the printed `/add-dir "<worktree>"`
+  line, then run the same `/jira-dev-harness:implement` command again. If
+  `/add-dir` isn't available, restart with `claude --add-dir "<worktree>"
+  --resume`. The plugin never changes Claude Code's permissions itself, and
+  directory access may not persist across sessions.
+- **Second run:** the verified worktree is reused, and the session is
+  switched to *implementing*, recording the worktree, its signed binding,
+  and a baseline of its HEAD and existing changes. Running `/implement`
+  again later (for example after a resume) reuses the same worktree, as
+  long as the approved plan has the same base commit.
+
+Then:
+
+- **Only the Developer Agent writes, only in the worktree.** That is
+  `jira-dev-harness:developer`, on Sonnet. Its writes into your main
+  checkout, another ticket's worktree, or anywhere else are denied. Its
+  shell commands must start with `cd "<worktree>" &&`. The main
+  conversation and every other agent stay read-only.
 - **Every Developer edit prompts you,** even if you have saved allow rules.
   **Every project command that isn't read-only prompts you too**, such as
   a test run, a build, or an install.
 - **The authorization is re-checked on every write.** If a new plan
-  revision is saved, the approval becomes invalid, or the repository
-  changes, the next write is denied.
-- **Writes are limited to the approved repository,** after symlinks are
-  followed. These are always off limits:
-  - `.git/` and `.claude/` (except approved rule files)
+  revision is saved, the approval becomes invalid, the repository changes,
+  or the worktree's signed binding no longer verifies, the next write is
+  denied. Sessions authorized in place by an older plugin version get no
+  new writes; run `/implement` again.
+- **Writes are limited to the ticket worktree,** after symlinks and
+  junctions are followed. These are always off limits:
+  - `.git` and `.claude/` (except approved rule files)
   - `.mcp.json` and the mapping file
   - the plan store
 
@@ -210,8 +257,33 @@ of HEAD and your pre-existing uncommitted changes. Then:
 - **The result is a durable implementation report,** stored next to the
   plan. It records the Developer's report, a coordinator check against
   git, and what git itself reports: the changed files, the tracked-diff
-  hash, untracked file hashes, and whether HEAD moved. The Phase 5
-  Reviewer will use it. Changes stay uncommitted.
+  hash, untracked file hashes, and whether HEAD moved, all read from the
+  worktree. The Phase 5 Reviewer will use it. Changes stay uncommitted in
+  the worktree. The worktree is never removed automatically.
+- **Check a ticket's worktree** at any time (read-only):
+  `node "<plugin>/scripts/plan-store.cjs" worktree-status "<plugin data>" <KEY>`.
+- **Plugin-managed worktrees are protected in every session.** Claude's
+  shell commands can't run `git worktree remove`, `move`, or `repair` on
+  them, or delete them recursively, and `git worktree prune` is refused
+  while one of their directories is missing. Other git and worktree use is
+  not affected.
+
+> **Ticket worktrees (Phase 8C, v0.8.0):** review and review approval work on the ticket
+> worktree. The review facts, recorded checks, review record, HTML report,
+> and the developer's review approval all name the worktree (path, branch,
+> base commit, and signed binding) and are computed from it, never from the
+> main checkout. A missing, moved, or changed worktree binding stops the
+> review instead of falling back. **Shipping** (`/jira-dev-harness:ship`)
+> commits, pushes, and opens the pull request from the worktree, on its
+> fixed branch `jira/<KEY>`; `--branch` is refused, and no branch is created
+> or switched. Before every push and pull request it re-verifies the
+> approval chain, the worktree binding and branch, the shipping commit's
+> exact content, and the authorized remote (including any push URL). The
+> signed ship record binds the worktree, the plan revision, the review, and
+> the developer's review approval, and `/jira-dev-harness:merge` checks
+> them again. Tickets that were implemented in place before this version
+> keep their existing review, approval, and shipping path, including
+> `--branch`.
 
 ### 4. Review: `/jira-dev-harness:review`
 
@@ -433,6 +505,53 @@ Evidence must be in GitHub's REST shape (a pull request with `head.sha`,
 "insufficient evidence", and you can use the GitHub CLI route or merge in
 the provider.
 
+### Removing a ticket worktree: `/jira-dev-harness:worktree-remove`
+
+The plugin never removes a worktree by itself. When you are done with a
+ticket's worktree, type `/jira-dev-harness:worktree-remove <KEY>` in the main
+checkout. It verifies the signed binding, the repository, the branch, and
+the path, and refuses while:
+
+- the worktree has tracked or untracked changes
+- the ticket branch has commits that are not on origin
+- a sensitive ignored file is there (`.env`, keys, credentials); move it
+  yourself, the plugin never deletes one
+- the worktree contains a symbolic link or junction (other than a tracked
+  symlink): git's removal follows an ignored junction and deletes the files
+  of its target, outside the worktree. Remove the link itself first.
+- an implementation, review, or (not yet finished) shipping session of the
+  ticket is active; finish it, then end it with `--end-session <id>`, which
+  switches it to planning mode and keeps its previous state in the plugin's
+  session history. A shipping session whose pull request is not recorded
+  yet can't be ended this way; finish shipping first.
+
+Other ignored files (for example `node_modules/`) are listed first. Run the
+command again with `--confirm-ignored <count>`; it removes them only if the
+exact listed set is still there (each file's name, size, and modification
+time), and re-checks everything immediately before removal. A re-plan must
+decide keep, revise, or revert for every path the earlier worktree work
+touched (`worktree-status` lists them). The removal itself is git's own `git worktree remove`,
+without `--force`. The ticket branch is kept, nothing is pruned, and a
+signed removal record is added; every earlier record stays. A merge of the
+shipped pull request can still be verified afterwards, only if the removal
+record, the immutable ship record, the shipped commit, and the pull request
+number all agree, and the merge still needs its own `/jira-dev-harness:merge`.
+Because the branch is kept, a new worktree for the same ticket is refused
+until you deal with the old branch yourself.
+
+**Immutable ship records.** The signed ship record of a review is never
+overwritten. If the pull request details need a correction, recording the
+pull request again in the same shipping session appends a signed revision
+that names the previous one; a broken chain makes the record invalid
+(fail closed).
+
+**Re-planning with an existing worktree.** When `/jira-dev-harness:ticket`
+re-plans a ticket whose worktree already holds work (for example after a
+FAIL review), the Analyzer and Planner get that work, and the plan must
+include an `## Existing worktree changes` section saying, per file, keep,
+revise, or revert; saving a plan without it is refused. The worktree is
+reused only when the new plan has the same base commit.
+
 ### 8. Jira progress: `/jira-dev-harness:jira-sync`
 
 ```text
@@ -584,6 +703,8 @@ work, start a new session.
   allowlist:
   - read-only git
   - the plan store's draft, save, report, status, and attachment commands
+  - the read-only ticket discovery commands (`ticket-ref`, `assigned-jql`,
+    `mapping-status`)
   - `cd`, `ls`, `cat`, `head`, and `tail`
   - single attachment downloads
 
@@ -773,8 +894,9 @@ claude --plugin-dir /path/to/jira-dev-harness
 
 Then inside the session:
 
-- `/jira-dev-harness:ticket <jira-url>` runs the analysis and planning
-  workflow
+- `/jira-dev-harness:ticket <jira-url | KEY>` runs the analysis and planning
+  workflow; with no argument it lists your assigned tickets and waits for
+  your choice
 - `/jira-dev-harness:approve <ISSUE-KEY> rN <sha256>` approves a plan
   revision
 - `/jira-dev-harness:implement <ISSUE-KEY> rN <sha256>` implements an
@@ -803,7 +925,7 @@ Run the automated tests (Node 18 or later; they use throwaway repositories
 and a local bare "origin", with no network or account):
 
 ```bash
-node --test                              # Phase 6: approval, ship, merge, providers, guard
+node --test                              # Phases 6-8: approval, ship, merge, providers, Jira sync, connect, ticket discovery, guard
 node tests/legacy/guard-tests.cjs        # guard rules (60)
 node tests/legacy/phase4-tests.cjs       # implement authorization and Developer boundaries (74)
 node tests/legacy/phase5-tests.cjs       # review facts, checks, enforcement, staleness (68)
@@ -873,6 +995,7 @@ jira-dev-harness/
 │       ├── jira-gate.cjs    # Jira evidence gate: board, workflow, and write checks
 │       ├── jira-sync.cjs    # Jira sync session: start, plan, confirm
 │       ├── progress.cjs     # Stage from signed records, comment text, audit ledger
+│       ├── discover.cjs     # Assigned-ticket discovery: fixed JQL, ticket-reference parsing, mapping verdict (read-only)
 │       ├── merge.cjs        # Merge authorization, evidence store, gh and MCP routes
 │       ├── merge-gate.cjs   # Pure gate over raw provider responses; fails closed
 │       └── provider.cjs     # GitHub adapters: MCP tool classification, official-gh CLI
@@ -881,7 +1004,9 @@ jira-dev-harness/
 │   ├── legacy/              # Phase 1-5 standalone suites: guard, phase4, phase5
 │   ├── phase6.test.cjs      # approval, ship, provider, and guard cases
 │   ├── merge.test.cjs       # merge gate, evidence hook, guard, mocked providers
-│   └── jira.test.cjs        # Jira mapping, gate, stages, ledger, hook, guard; mocked Jira
+│   ├── jira.test.cjs        # Jira mapping, gate, stages, ledger, hook, guard; mocked Jira
+│   ├── connect.test.cjs     # connection statuses, typed confirmation, READY rule
+│   └── discover.test.cjs    # ticket discovery: query, parsing, mapping verdict, guard, skill wording
 ├── README.md
 └── ROADMAP.md               # Phases, acceptance criteria, validation log
 ```
@@ -889,7 +1014,7 @@ jira-dev-harness/
 ### Planned workflow
 
 ```text
-/jira-dev-harness:ticket <url>
+/jira-dev-harness:ticket [<url> | <KEY>]      (no argument: list my assigned tickets, then I choose one)
   │
   ├─ 1. Preflight: identify repo, validate ticket belongs to this project
   ├─ 2. Gather: Jira requirements + attachments, repo code, project instructions
@@ -942,6 +1067,9 @@ requirements that later phases must keep:
 | 5 | Independent Reviewer Agent | Completed |
 | 6 | Approval Gates + Git/PR | Completed |
 | 7 | Jira Progress Automation | Completed |
+| 8A | Per-developer connection onboarding | Implemented (offline-tested; live checks pending) |
+| 8B | Assigned-ticket discovery | Implemented (offline-tested; live Jira check pending) |
+| 8C | Git worktree isolation (v0.8.0) | Implemented: offline-tested, live-tested with a disposable repository and mocked GitHub and Jira; real GitHub and Jira pending |
 | 8 | End-to-End Testing + Team Rollout | Pending |
 
 ### Model allocation
@@ -1050,7 +1178,15 @@ What the plugin can and cannot guarantee:
   build, or script that you allow at a prompt can read or write anything
   your user can, including outside the repository. The write boundary
   applies only to Claude's file tools. Read the command in each prompt
-  before allowing it. Untrusted repositories can also run code through git
+  before allowing it.
+- **The worktree is an isolation of the work, not a sandbox.** The
+  Developer's shell commands must start with `cd "<worktree>" &&`, and the
+  guard refuses a later directory change or git pointed elsewhere. That
+  only decides where a command starts. A command can still name absolute
+  paths, `..`, or the main checkout in its arguments, and a script it runs
+  can do anything, so the per-command prompt remains the real control.
+  Likewise, the protection of managed worktrees matches command patterns
+  and can be bypassed by a disguised command. Untrusted repositories can also run code through git
   configuration, for example diff drivers.
 - **A review verdict is only as good as its evidence.**
   - Only checks you approved are executed.

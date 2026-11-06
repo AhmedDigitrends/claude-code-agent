@@ -20,16 +20,22 @@ briefly:
 
 - **REVIEW APPROVAL: GRANTED.** The approval is signed and bound to:
   - this repository and ticket
+  - the reviewed workspace: the ticket worktree with its path, branch,
+    base commit, and signed binding (or the main checkout for a legacy
+    in-place review)
   - the approved plan revision and its SHA-256
   - the implementation report and its SHA-256
   - this exact review file and its HTML report
-  - the current git HEAD, the diff, and the content hash of every changed
-    file listed in the verdict
+  - the workspace's current git HEAD, the diff, and the content hash of
+    every changed file listed in the verdict
 
-  Any further change to the code, the plan, the report, or the review
-  invalidates it. It does **not** commit, push, or open a pull request. To
-  do that, the developer runs the `/jira-dev-harness:ship` command that the
-  verdict printed.
+  Any further change to the code in that workspace, the worktree binding,
+  the plan, the report, or the review invalidates it. It is a separate gate
+  from the Reviewer's PASS. It does **not** commit, push, or open a pull
+  request. To ship it, the developer runs the `/jira-dev-harness:ship`
+  command that the verdict printed. A ticket worktree ships from that
+  worktree, on its fixed branch `jira/<ISSUE-KEY>` (no `--branch`); a legacy
+  in-place review ships from the main checkout, as before.
 - **REVIEW APPROVAL: ALREADY GRANTED.** The same review was approved
   earlier, and nothing changed.
 - **REVIEW APPROVAL: REFUSED.** Nothing was approved. Explain each printed
@@ -41,6 +47,9 @@ briefly:
   - the review is not the latest one, the SHA-256 is wrong or shortened, or
     the review or its report, logs, or bundle were edited
   - the review predates Phase 6 and is unsigned, so it must be re-run
+  - the ticket worktree is missing, was moved, or its binding changed, so
+    `/jira-dev-harness:implement` must be run again (a worktree review is
+    never checked against the main checkout instead)
 
 Remind the developer that the HTML report is the artifact they are
 approving, and that a summary from Claude is not. If they have not opened

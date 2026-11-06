@@ -174,7 +174,9 @@ function officialGh(repoRoot, host) {
   const exe = resolveExecutable("gh");
   if (!exe) return { ok: false, reason: "the GitHub CLI (gh) was not found on PATH" };
   if (SHIMS.test(exe)) return { ok: false, reason: `${exe} is a script or shim, not the official gh executable` };
-  if ((repoRoot && under(repoRoot, exe)) || under(os.tmpdir(), exe)) {
+  // repoRoot may list several roots (the main checkout and a ticket worktree).
+  const roots = [].concat(repoRoot || []).filter(Boolean);
+  if (roots.some((r) => under(r, exe)) || under(os.tmpdir(), exe)) {
     return { ok: false, reason: `${exe} is inside the repository or a temporary directory; refusing to run it` };
   }
   const v = spawnSync(exe, ["--version"], { cwd: os.tmpdir(), encoding: "utf8", timeout: 15000, windowsHide: true });

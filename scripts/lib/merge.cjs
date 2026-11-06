@@ -35,7 +35,43 @@ function shipRecordFile(t, reviewId) {
   return path.join(R.reviewsDir(t), `ship-${reviewId}.json`);
 }
 
-// Signed record of what was shipped, written when a pull request is recorded.
+// Fields of a ship record that a later revision may never change.
+const SHIP_IMMUTABLE = ["kind", "issueKey", "site", "repo", "layout", "workspace", "reviewApprovalSha256", "remote", "reviewId", "reviewSha256", "planRevision", "planSha256", "commit", "branch", "base", "approvedFiles"];
+
+function shipRevisionFile(t, reviewId, k) {
+  return k === 1 ? shipRecordFile(t, reviewId) : path.join(R.reviewsDir(t), `ship-${reviewId}-r${k}.json`);
+}
+
+// The verified revision chain of one review's ship record: r1 is
+// ship-<id>.json, later corrections are ship-<id>-r<k>.json. Each revision is
+// signed, names the SHA-256 of the one before it, and keeps every immutable
+// field. Returns the revisions, or null if any of them does not verify.
+function shipChain(dataDir, t, reviewId) {
+  const key = L.approvalKey(dataDir, false);
+  const out = [];
+  for (let k = 1; ; k += 1) {
+    const file = shipRevisionFile(t, reviewId, k);
+    if (!fs.existsSync(file)) break;
+    const r = L.readJson(file);
+    if (!r || !L.signatureValid(r, key) || (r.revision || 1) !== k) return null;
+    if (k > 1) {
+      const prev = out[k - 2];
+      if (r.previousSha256 !== prev.sha256) return null;
+      if (SHIP_IMMUTABLE.some((f) => JSON.stringify(r[f]) !== JSON.stringify(prev.record[f]))) return null;
+    }
+    out.push({ k, file, record: r, sha256: L.sha256(file) });
+  }
+  // Any revision file beyond the chain (a gap, or revisions without r1)
+  // means a revision was removed or inserted: nothing verifies then.
+  const dir = R.reviewsDir(t);
+  const extra = fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => new RegExp(`^ship-${reviewId}-r([0-9]+)\\.json$`).exec(f)).filter(Boolean).map((m) => Number(m[1])) : [];
+  if (extra.some((k) => k > out.length)) return null;
+  return out;
+}
+
+// Signed record of what was shipped, written when a pull request is
+// recorded. It is never overwritten: a later correction of the pull request
+// details is appended as a new signed revision that names the previous one.
 function writeShipRecord(dataDir, state) {
   const t = L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`);
   const record = {
@@ -43,6 +79,12 @@ function writeShipRecord(dataDir, state) {
     issueKey: state.issueKey,
     site: state.site,
     repo: state.repo,
+    // Phase 8C: where it was shipped from (the signed worktree binding, or
+    // the main checkout for a legacy in-place ticket), and the exact
+    // developer review approval it was shipped under.
+    layout: state.layout || "legacy-in-place",
+    ...(state.workspace ? { workspace: state.workspace } : {}),
+    ...(state.reviewApprovalSha256 ? { reviewApprovalSha256: state.reviewApprovalSha256 } : {}),
     remote: state.remote,
     reviewId: state.reviewId,
     reviewSha256: state.reviewSha256,
@@ -55,18 +97,30 @@ function writeShipRecord(dataDir, state) {
     pr: state.pr,
     createdAt: new Date().toISOString(),
   };
-  record.hmac = L.sign(record, L.approvalKey(dataDir, true));
-  fs.writeFileSync(shipRecordFile(t, state.reviewId), JSON.stringify(record, null, 2) + "\n");
+  const key = L.approvalKey(dataDir, true);
+  const chain = shipChain(dataDir, t, state.reviewId);
+  if (chain === null) fail(`the existing ship record of ${state.reviewId} does not verify; nothing was recorded`);
+  record.revision = chain.length + 1;
+  if (chain.length) {
+    const prev = chain[chain.length - 1];
+    const changed = SHIP_IMMUTABLE.filter((f) => JSON.stringify(record[f]) !== JSON.stringify(prev.record[f]));
+    if (changed.length) fail(`a ship record for ${state.reviewId} already exists with a different ${changed.join(", ")}; it is never replaced. Nothing was recorded`);
+    record.previousSha256 = prev.sha256;
+  }
+  record.hmac = L.sign(record, key);
+  fs.writeFileSync(shipRevisionFile(t, state.reviewId, record.revision), JSON.stringify(record, null, 2) + "\n", { flag: "wx" });
   return record;
 }
 
+// The latest verified revision of the newest review's ship record, or null
+// (no record, or a record or revision that does not verify: fail closed).
 function latestShipRecord(dataDir, t) {
   const dir = R.reviewsDir(t);
   if (!fs.existsSync(dir)) return null;
-  const ids = fs.readdirSync(dir).map((f) => /^ship-rv-([0-9]+)\.json$/.exec(f)).filter(Boolean).map((m) => Number(m[1])).sort((a, b) => a - b);
+  const ids = fs.readdirSync(dir).map((f) => /^ship-rv-([0-9]+)(-r[0-9]+)?\.json$/.exec(f)).filter(Boolean).map((m) => Number(m[1])).sort((a, b) => a - b);
   if (!ids.length) return null;
-  const record = L.readJson(path.join(dir, `ship-rv-${ids[ids.length - 1]}.json`));
-  return record && L.signatureValid(record, L.approvalKey(dataDir, false)) ? record : null;
+  const chain = shipChain(dataDir, t, `rv-${ids[ids.length - 1]}`);
+  return chain && chain.length ? chain[chain.length - 1].record : null;
 }
 
 // Signed record of a merge that the provider confirmed. Phase 7 reads it to
@@ -88,7 +142,29 @@ function writeMergeRecord(dataDir, state) {
     mergedAt: state.mergedAt,
   };
   record.hmac = L.sign(record, L.approvalKey(dataDir, true));
-  fs.writeFileSync(path.join(R.reviewsDir(t), `merge-${state.reviewId}.json`), JSON.stringify(record, null, 2) + "\n");
+  // Immutable: a merge confirmed by the provider is recorded once. A repeat
+  // confirmation of the same merge keeps the existing record; anything else
+  // is refused.
+  const file = path.join(R.reviewsDir(t), `merge-${state.reviewId}.json`);
+  if (fs.existsSync(file)) {
+    const existing = L.readJson(file);
+    const valid = existing && L.signatureValid(existing, L.approvalKey(dataDir, false));
+    if (valid && existing.commit === record.commit && existing.mergeCommit === record.mergeCommit) return existing;
+    if (valid) fail(`a different merge record for ${state.reviewId} already exists; it is never replaced`);
+    // An unsigned or edited file is not a record: keep it under a new name
+    // (never overwritten) and write the confirmed one.
+    const old = fs.readFileSync(file);
+    for (let k = 1; ; k += 1) {
+      try {
+        fs.writeFileSync(file.replace(/\.json$/, `-replaced-${k}.json`), old, { flag: "wx" });
+        break;
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+    }
+    fs.rmSync(file);
+  }
+  fs.writeFileSync(file, JSON.stringify(record, null, 2) + "\n", { flag: "wx" });
   return record;
 }
 
@@ -138,11 +214,18 @@ function start(dataDir, sessionId, ref, prArg, shaArg, method, cwd) {
   if (ship.commit !== headSha) fail(`the shipped commit is ${ship.commit}, not ${headSha}`);
   // The review approval chain must still hold. The tree is committed now, so
   // only the plan, report, review, and approval records are re-checked.
-  const v = RA.verifyReview(dataDir, ref, ship.reviewId, cwd, { requireRecord: true, checkTree: false });
+  const v = RA.verifyReview(dataDir, ref, ship.reviewId, cwd, { requireRecord: true, checkTree: false, allowRemovedWorkspace: true });
   if (v.fileSha256 !== ship.reviewSha256) fail("the review is not the one that was shipped");
   if (!L.sameRepo(ship.repo, v.repo)) fail("this is not the repository that was shipped");
+  const shipProblem = shipBindingProblem(t, ship, v, Number(prArg));
+  if (shipProblem) fail(shipProblem);
   const remote = P.parseRemote(L.git(["config", "--get", "remote.origin.url"], v.repo.root));
   if (!remote || remote.hasCredentials || !P.detectProvider(remote, v.repo.root)) fail("origin is not a supported GitHub remote without embedded credentials");
+  // The merge targets exactly the repository that was shipped to.
+  const same = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
+  if (ship.remote && (!same(remote.host, ship.remote.host) || !same(remote.owner, ship.remote.owner) || !same(remote.name, ship.remote.name))) {
+    fail(`origin is ${remote.host}/${remote.owner}/${remote.name}, but the ticket was shipped to ${ship.remote.host}/${ship.remote.owner}/${ship.remote.name}`);
+  }
   const warnings = [];
   if (ship.pr && ship.pr.url && !ship.pr.url.endsWith(`/pull/${prArg}`)) {
     warnings.push(`the recorded pull request is ${ship.pr.url}; the provider's own response decides which pull request #${prArg} is`);
@@ -156,6 +239,9 @@ function start(dataDir, sessionId, ref, prArg, shaArg, method, cwd) {
       revision: ship.planRevision,
       sha256: ship.planSha256,
       repo: v.repo,
+      layout: ship.layout || "legacy-in-place",
+      ...(ship.workspace ? { workspace: ship.workspace } : {}),
+      ...(ship.reviewApprovalSha256 ? { reviewApprovalSha256: ship.reviewApprovalSha256 } : {}),
       remote,
       reviewId: ship.reviewId,
       reviewSha256: ship.reviewSha256,
@@ -176,11 +262,48 @@ function requireMerging(state, ...stages) {
   if (stages.length && !stages.includes(state.stage)) fail(`this step needs stage ${stages.join(" or ")}, but the session is at "${state.stage}"`);
 }
 
+// Phase 8C: a ship record from a ticket worktree must still match the
+// reviewed workspace (the same signed binding, which verifyReview has just
+// re-verified) and the exact developer review approval it was shipped under.
+// A worktree ship record never falls back to the main checkout.
+function shipBindingProblem(t, ship, v, prNumber) {
+  const worktree = ship.layout === "worktree" || !!(ship.workspace && ship.workspace.kind === "worktree") || v.workspace.kind === "worktree";
+  if (worktree && !R.sameWorkspace(ship.workspace, v.workspace)) return "the shipped worktree is not the reviewed one (binding, branch, or base changed)";
+  if (ship.workspace && ship.workspace.kind === "worktree" && ship.branch !== ship.workspace.branch) return "the shipped branch is not the worktree's branch";
+  if (ship.reviewApprovalSha256) {
+    const file = RA.approvalFile(t, ship.reviewId);
+    if (!fs.existsSync(file) || L.sha256(file) !== ship.reviewApprovalSha256) return "the developer's review approval changed since the ticket was shipped";
+  }
+  // After an authorized removal, the worktree can no longer be inspected, so
+  // the signed removal record must agree with the immutable ship evidence:
+  // the removed worktree's HEAD, and its origin branch, are the shipped
+  // commit, and the pull request is the recorded one. It never replaces the
+  // review, the approvals, or this merge authorization.
+  const rem = v.workspaceRemoval;
+  if (rem) {
+    if (!worktree) return "a removal record is only valid for a worktree ticket";
+    if (!L.sameRepo(rem.primary, ship.repo)) return "the removal record is for another repository than the ship record";
+    if (rem.head !== ship.commit) return `the worktree was removed at ${rem.head}, not at the shipped commit ${ship.commit}`;
+    if (!rem.pushed || rem.pushed.commit !== ship.commit) return "the removal record does not show the shipped commit on origin";
+    if (rem.branch !== ship.branch) return "the removed worktree's branch is not the shipped branch";
+    if (!ship.pr || !ship.pr.url || !String(ship.pr.url).endsWith(`/pull/${prNumber}`)) {
+      return `the ship record's pull request (${ship.pr && ship.pr.url}) is not #${prNumber}; after a worktree removal the pull request must match exactly`;
+    }
+  }
+  return null;
+}
+
 // The approval chain must still hold whenever the gate is evaluated.
 function chainProblem(dataDir, state) {
   try {
-    const v = RA.verifyReview(dataDir, `${state.site}/${state.issueKey}`, state.reviewId, state.repo.root, { requireRecord: true, checkTree: false });
-    return v.fileSha256 === state.reviewSha256 ? null : "the review changed";
+    const v = RA.verifyReview(dataDir, `${state.site}/${state.issueKey}`, state.reviewId, state.repo.root, { requireRecord: true, checkTree: false, allowRemovedWorkspace: true });
+    if (v.fileSha256 !== state.reviewSha256) return "the review changed";
+    const t = L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`);
+    // The current ship record (latest verified revision) must still be the
+    // one this merge was authorized for.
+    const ship = latestShipRecord(dataDir, t);
+    if (!ship || ship.reviewId !== state.reviewId || ship.commit !== state.headSha) return "the ship record no longer verifies or no longer names the authorized commit";
+    return shipBindingProblem(t, { ...ship, ...state, pr: ship.pr }, v, state.pr);
   } catch (e) {
     return e.message;
   }
@@ -206,7 +329,7 @@ function gate(dataDir, state, now, server) {
 const defaultDeps = () => ({ officialGh: P.officialGh, adapter: P.GhAdapter });
 
 function ghInfo(state, deps) {
-  const info = deps.officialGh(state.repo.root, state.remote.host);
+  const info = deps.officialGh([state.repo.root, state.workspace && state.workspace.path].filter(Boolean), state.remote.host);
   if (!info.ok) fail(`the GitHub CLI adapter is unavailable: ${info.reason}. Use your GitHub MCP connection, or merge in the provider yourself`);
   return info;
 }

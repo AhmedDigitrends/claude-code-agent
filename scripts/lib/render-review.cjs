@@ -47,6 +47,25 @@ function list(items) {
   return items && items.length ? `<ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : "<p class=\"muted\">None</p>";
 }
 
+// The reviewed workspace (Phase 8C): the ticket worktree with its signed
+// binding, or the main checkout for a legacy in-place review.
+function workspaceRows(ws) {
+  if (!ws || ws.kind !== "worktree") {
+    return `<dt>Reviewed workspace</dt><dd>main checkout (legacy in-place implementation)${ws && ws.path ? `: ${esc(ws.path)}` : ""}</dd>`;
+  }
+  return [
+    `<dt>Reviewed workspace</dt><dd>ticket worktree ${esc(ws.path)}</dd>`,
+    `<dt>Ticket branch</dt><dd>${esc(ws.branch)}</dd>`,
+    `<dt>Approved base commit</dt><dd>${esc(ws.baseHead)}</dd>`,
+    `<dt>Worktree binding</dt><dd>worktree-b${esc(ws.binding)}.json · signature ${esc(String(ws.bindingHmac).slice(0, 16))}…</dd>`,
+  ].join("\n");
+}
+
+function workspaceLine(ws) {
+  if (!ws || ws.kind !== "worktree") return `- Reviewed workspace: main checkout (legacy in-place implementation)`;
+  return `- Reviewed workspace: ticket worktree ${ws.path}, branch ${ws.branch}, base ${ws.baseHead}, binding worktree-b${ws.binding} (signature ${String(ws.bindingHmac).slice(0, 16)}…)`;
+}
+
 function renderHtml(review, logs) {
   const id = review.identity;
   const statuses = ["Passed", "Failed", "Blocked", "Not Run"];
@@ -107,8 +126,9 @@ ${review.reviewerVerdict !== review.verdict ? `<p><b>Reviewer verdict ${esc(revi
 <dt>Requirements source</dt><dd>${esc(review.requirementsSource)}</dd>
 <dt>Approved plan</dt><dd>r${esc(id.planRevision)} · sha256 ${esc(id.planSha256)}</dd>
 <dt>Implementation report</dt><dd>${esc(id.implementationReport)}</dd>
-<dt>Repository</dt><dd>${esc(id.repo.root)}</dd>
+<dt>Repository (primary identity)</dt><dd>${esc(id.repo.root)}</dd>
 <dt>Root commit / origin</dt><dd>${esc(id.repo.rootCommits)} / ${esc(id.repo.remote || "none")}</dd>
+${workspaceRows(id.workspace)}
 <dt>HEAD</dt><dd>${esc(id.tree.head)}</dd>
 <dt>Tracked diff sha256</dt><dd>${esc(id.tree.trackedDiffSha256)}</dd>
 <dt>Untracked files</dt><dd>${esc(id.tree.untrackedFileSha256.join(", ") || "none")}</dd>
@@ -132,7 +152,7 @@ ${review.corrections.length ? `<p><b>Corrections applied to the Reviewer's outpu
 <div class="table"><table><thead><tr><th>ID</th><th>Requirement</th><th>Type</th><th>Scenario and steps</th><th>Expected</th><th>Actual</th><th>Status</th><th>Evidence</th></tr></thead><tbody>${tcRows || '<tr><td colspan="8">None</td></tr>'}</tbody></table></div>
 
 <h2>Executed checks</h2>
-<p class="muted">Run by jira-dev-harness in the repository root after the developer approved each command. Logs are recorded verbatim apart from credential redaction.</p>
+<p class="muted">Run by jira-dev-harness in the reviewed workspace (${esc(id.workspace && id.workspace.kind === "worktree" ? `ticket worktree ${id.workspace.path}` : "main checkout")}) after the developer approved each command. Logs are recorded verbatim apart from credential redaction.</p>
 <div class="table"><table><thead><tr><th>ID</th><th>Check</th><th>Command</th><th>Exit</th><th>Assessment</th><th>Duration</th></tr></thead><tbody>${checkRows || '<tr><td colspan="6">No checks were recorded.</td></tr>'}</tbody></table></div>
 
 <h2>Unresolved findings (${openFindings.length})</h2>
@@ -162,6 +182,7 @@ function renderMarkdown(review) {
     `- Plan: r${id.planRevision}, sha256 ${id.planSha256}`,
     `- Implementation report: ${md(id.implementationReport)}`,
     `- Repository: ${md(id.repo.root)} (root commit ${md(id.repo.rootCommits)})`,
+    md(workspaceLine(id.workspace)),
     `- HEAD ${md(id.tree.head)}, tracked diff sha256 ${md(id.tree.trackedDiffSha256)}`,
     `- Reviewed at ${md(review.reviewedAt)}`,
     "",

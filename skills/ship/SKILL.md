@@ -1,6 +1,6 @@
 ---
-description: Commit the approved changes of a reviewed jira-dev-harness ticket on a ticket branch, push it, and open a pull request linked to the Jira ticket. Only the developer can run this. It never merges.
-argument-hint: <ISSUE-KEY> <review-id> <full-sha256> [--branch <name>]
+description: Commit the approved changes of a reviewed jira-dev-harness ticket on its ticket branch (in the ticket's own git worktree), push it, and open a pull request linked to the Jira ticket. Only the developer can run this. It never merges.
+argument-hint: <ISSUE-KEY> <review-id> <full-sha256> [--branch <name>, legacy in-place tickets only]
 disable-model-invocation: true
 allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-start *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-start *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-prepare-pr *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-record-pr *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-status *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-checks *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-prepare-pr *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-record-pr *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-status *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-checks *)
 ---
@@ -22,6 +22,16 @@ available.
 
 - **REFUSED:** if the verdict above says `SHIP: REFUSED`, report the
   reason and how to fix it, and stop. Do not work around it.
+- **Where it ships from.** The verdict's `Shipped from` line says it:
+  - **ticket worktree** (Phase 8C): every git step runs in that worktree,
+    on its fixed branch `jira/<ISSUE-KEY>`, which is already checked out
+    there. Nothing creates or switches a branch, and `--branch` is refused.
+    The main checkout is never used for shipping and is never changed.
+  - **main checkout (legacy in-place implementation)**: only for tickets
+    implemented by plugin versions before Phase 8C, as before.
+
+  If the worktree binding is missing, changed, or the worktree moved, every
+  step refuses; it never falls back to the main checkout.
 - **Never merge.** There is no merge step. Do not use any merge tool, and
   do not enable auto-merge. The guard denies merge tools in this session.
 - **Only the steps below.** Do not run `git` or `gh` yourself, do not
@@ -53,25 +63,33 @@ prove which account is connected, and it replaces none of the gates below.
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path <site> <ISSUE-KEY> commit`
 2. Write a commit message to that path: a first line that starts with the
    issue key, then a blank line and a short body that says what changed
-   and why. Base it on the approved plan file and `git diff` (read-only),
-   not on guesses. Follow the repository's commit conventions if its
-   instruction files state any.
+   and why. Base it on the approved plan file and the reviewed diff, read
+   only: for a worktree, `git -C "<worktree path>" diff` (Claude Code may
+   ask the developer to approve git in another directory), not on guesses.
+   Follow the repository's commit conventions if its instruction files
+   state any.
 3. Run:
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-commit "${CLAUDE_PLUGIN_DATA}" <session id> "<draft path>"`
 
-   It creates the ticket branch if needed, stages exactly the approved
-   files, checks that nothing else is staged and that no credentials were
-   added, commits, and verifies that the commit holds exactly the approved
-   content.
+   It re-verifies the review, the developer's review approval, and the
+   worktree binding, then stages exactly the approved files, checks that
+   nothing else is staged and that no credentials were added, commits, and
+   verifies that the commit holds exactly the approved content. In place
+   (legacy only) it creates the ticket branch if needed. In a worktree it
+   records the shipping commit as authorized, so a later re-review in the
+   same worktree does not treat it as unreviewed work.
 
 ## Step 2: Push
 
 Run:
 `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-push "${CLAUDE_PLUGIN_DATA}" <session id>`
 
-It pushes only the ticket branch to `origin`, without force, and refuses
-the default branch and conventional protected branch names. It uses the
-Git transport that is already authorized on this machine.
+It first re-verifies everything again (the gate chain, the worktree
+binding and branch, the commit's exact content, and that `origin`,
+including any push URL, is still the authorized repository). Then it
+pushes only the ticket branch to `origin`, without force, and refuses the
+default branch and conventional protected branch names. It uses the Git
+transport that is already authorized on this machine.
 
 ## Step 3: Pull request
 
@@ -88,8 +106,9 @@ Git transport that is already authorized on this machine.
    is connected in this session. Read their descriptions and schemas.
    - If a tool creates a pull request and exposes `head`, `base`, `title`,
      and `body` fields (plus owner and repository), call it with the
-     prepared values **exactly**. The guard checks them and the developer
-     is asked to confirm. Do not set a draft or auto-merge option unless
+     prepared values **exactly**. The guard checks them, re-verifies the
+     whole chain (review, approval, worktree binding, commit, remote), and
+     the developer is asked to confirm. Do not set a draft or auto-merge option unless
      the developer asked for it. Then record the result:
      `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-record-pr "${CLAUDE_PLUGIN_DATA}" <session id> <pull request URL>`
      and, if a read tool exists, read the pull request back to confirm its
@@ -119,6 +138,8 @@ Tell the developer:
 State plainly that **nothing was merged and nothing will be merged by this
 plugin**: the developer merges in the hosting provider, after the
 repository's required checks and reviews pass. A Jira transition is a
-later phase and was not done.
+later phase and was not done. For a worktree ticket, say that the worktree
+stays in place (the plugin never removes it automatically) and that the
+main checkout was not changed.
 
 Then stop.
