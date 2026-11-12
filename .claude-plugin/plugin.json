@@ -3,6 +3,7 @@
   "displayName": "Jira Dev Harness",
   "version": "1.0.0",
   "license": "MIT",
+  "icon": "icon.png",
   "description": "Project-independent harness that takes an assigned Jira Cloud ticket through analysis, planning, approved and attended implementation in the ticket's own sibling git worktree, independent review, review approval, and commit, push, and pull request creation, in any language or framework.",
   "author": {
     "name": "jira-dev-harness maintainers"
