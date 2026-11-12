@@ -1,0 +1,14 @@
+{
+  "name": "jira-dev-harness-marketplace",
+  "owner": { "name": "Jira Dev Harness maintainers" },
+  "description": "Marketplace for the Jira Dev Harness Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "jira-dev-harness",
+      "source": "./",
+      "description": "Takes an assigned Jira Cloud ticket through analysis, approved implementation in an isolated git worktree, independent review, and a GitHub pull request.",
+      "version": "1.0.0",
+      "category": "development"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 // Phase 8C step 6: safe, user-only worktree removal; merge verification
 // after an authorized removal; immutable ship records; and re-planning with
-// an existing worktree. Disposable repositories under "React Apps/jadwa app",
+// an existing worktree. Disposable repositories under "React Apps/demo app",
 // a local bare origin, and mocked provider responses only.
 // Run with: node --test
 

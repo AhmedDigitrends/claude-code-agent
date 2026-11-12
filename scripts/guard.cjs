@@ -96,7 +96,7 @@ const PROTECTED_NAMES = /approval-r[0-9]+|plan-r[0-9]+\.(md|json)|impl-r[0-9]+-[
 // The only plan-store invocations Claude may run. session-start,
 // implement-start, review-start, and approve are reserved for user-only skills.
 const PLAN_STORE_SCRIPT = String.raw`node\s+("[^"]*[\\/]scripts[\\/]plan-store\.cjs"|'[^']*[\\/]scripts[\\/]plan-store\.cjs'|\S*[\\/]scripts[\\/]plan-store\.cjs)\s+`;
-const PLAN_STORE_CALL = new RegExp(`^${PLAN_STORE_SCRIPT}(draft-path|save|report-save|review-save|review-status|status|verify|attach-dir|clean-attach|ship-prepare-pr|ship-record-pr|ship-status|ship-checks|merge-collect|merge-verify|merge-record|merge-status|mapping-check|ticket-ref|assigned-jql|mapping-status|worktree-status|jira-plan|jira-confirm|jira-status|jira-ledger)\\b`);
+const PLAN_STORE_CALL = new RegExp(`^${PLAN_STORE_SCRIPT}(draft-path|save|report-save|review-save|review-status|review-share-record|status|verify|attach-dir|clean-attach|ship-prepare-pr|ship-record-pr|ship-status|ship-checks|merge-collect|merge-verify|merge-record|merge-status|mapping-check|ticket-ref|assigned-jql|mapping-status|worktree-status|jira-plan|jira-confirm|jira-status|jira-ledger)\\b`);
 // approve-review and ship-start are reserved too: "approve" matches before the hyphen.
 const RESERVED_STORE_CMD = /(plan-store(\.cjs)?["']?\s+(approve|session-start|implement-start|review-start|ship-start|merge-start|jira-start|worktree-remove)|scripts[\\/]connect(\.cjs)?["']?\s+(begin|evaluate))\b/;
 // The read-only connection report of /jira-dev-harness:connect. It names the
@@ -133,6 +133,9 @@ function decide(decision, reason) {
   process.exit(0);
 }
 const deny = (reason) => decide("deny", reason);
+// Claude Code lets a tool call through when a PreToolUse hook crashes (any
+// exit code other than 2). An unexpected error here must block instead.
+process.on("uncaughtException", (e) => deny(`the guard failed (${String((e && e.message) || e).slice(0, 120)}); blocking the call as a precaution.`));
 const ask = (reason) => decide("ask", reason);
 function allow() {
   process.exit(0);
@@ -481,6 +484,30 @@ function managedWorktreeProblem(command, cwd) {
   return null;
 }
 
+// Why an Artifact publish may not proceed in a workflow session, or null.
+// Allowed: the review session's main conversation publishing exactly the
+// current review's sanitized share view (intact against its signed record),
+// as a new artifact, with no extra files, assets, or runtime capabilities.
+function artifactPublishProblem(state, input, agentType) {
+  const why = "in a jira-dev-harness workflow session, only the review session may publish, and only the review's sanitized share view (review-<id>.share.html) as a new artifact";
+  if (agentType) return `${agentType} may not publish artifacts; ${why}`;
+  if (state.mode !== "reviewing" || !state.reviewBundle || !state.reviewId) return `nothing may be published in ${state.mode} mode; ${why}`;
+  for (const k of ["files", "file_paths", "asset", "asset_ids", "from_url", "type_url", "url", "root"]) {
+    if (input[k] !== undefined && input[k] !== null && input[k] !== false) return `the "${k}" option is not allowed; ${why}`;
+  }
+  if (input.capabilities && Object.keys(input.capabilities).length) return `runtime capabilities are not allowed; ${why}`;
+  const dir = path.dirname(state.reviewBundle);
+  const expected = path.join(dir, `review-${state.reviewId}.share.html`);
+  if (!input.file_path || normalize(input.file_path) !== normalize(expected)) return `only ${expected} may be published; ${why}`;
+  const dataDir = process.env.CLAUDE_PLUGIN_DATA;
+  const view = L.readJson(path.join(dir, `review-${state.reviewId}.share.json`));
+  if (!view || !L.signatureValid(view, L.approvalKey(dataDir, false)) || view.reviewId !== state.reviewId) return "the share view's signed record is missing or invalid; nothing may be published";
+  if (!fs.existsSync(expected) || L.sha256(expected) !== view.sha256) return "the share view was modified after it was generated; nothing may be published";
+  const reviewFile = path.join(dir, `review-${state.reviewId}.json`);
+  if (!fs.existsSync(reviewFile) || L.sha256(reviewFile) !== view.reviewSha256) return "the share view is not for the saved review; nothing may be published";
+  return null;
+}
+
 // The Developer's shell policy: never git state changes or hosting CLIs;
 // read-only commands follow the normal flow; anything else is a project
 // command that the developer must authorize interactively.
@@ -550,6 +577,19 @@ process.stdin.on("end", () => {
     state = { mode: "unknown" };
   }
 
+  // 1c. Claude Code's Artifact tool uploads a page to claude.ai. In a
+  // workflow session the only thing it may publish is the current review's
+  // sanitized share view, from the review session's main conversation, and
+  // the developer is always asked first (that prompt is the consent).
+  if (tool === "Artifact" && state && (toolInput.action === undefined || toolInput.action === "publish")) {
+    const problem = artifactPublishProblem(state, toolInput, agentType);
+    if (problem) deny(problem);
+    if (input.permission_mode !== "default") {
+      deny(`publishing a review report needs attended mode with a permission prompt; this session's permission mode is "${input.permission_mode}".`);
+    }
+    ask(`publish the sanitized review report of ${state.issueKey} ${state.reviewId} to claude.ai as an artifact? It contains the verdict, acceptance criteria, test cases, check results, findings, and the review SHA-256. It omits raw logs, check commands, local paths, the repository location and remote, links, and credentials. It starts private; anyone you share it with, or anyone with the link if you make it public, can read it. Allow only if you want it uploaded.`);
+  }
+
   // 2. The Developer Agent.
   if (agentType === DEVELOPER && (WRITE_TOOLS.has(tool) || SHELL_TOOLS.has(tool) || isMcpWrite)) {
     if (isMcpWrite) deny("the Developer Agent may not use Jira or other MCP write tools.");
@@ -599,6 +639,21 @@ process.stdin.on("end", () => {
       : /\bship-push\b/.test(command) ? `push branch ${state.branch} to origin (no force)`
         : `create the pull request for ${state.issueKey} with the GitHub CLI (head ${state.branch}, base ${state.base}; it will not be merged)`;
     ask(`jira-dev-harness wants to ${what}. Allow only if you approved the review and want this step now.`);
+  }
+
+  // 3b. Outside a workflow session no Jira write is ever silently allowed.
+  // Atlassian reads pass untouched; every Atlassian write (comment,
+  // transition, edit, create, any execute* meta-tool, or an operation that is
+  // not recognisably a read) needs the developer's explicit permission
+  // prompt. Without a prompt (bypass or don't-ask mode) it is refused.
+  if (!state) {
+    const kind = JG.classifyCall(tool, toolInput);
+    if (kind && kind !== "read") {
+      if (input.permission_mode === "bypassPermissions" || input.permission_mode === "dontAsk") {
+        deny(`Jira and other Atlassian writes need a permission prompt; this session's permission mode is "${input.permission_mode}". Use /jira-dev-harness:jira-sync for planned, audited Jira updates.`);
+      }
+      ask("write to Jira or another Atlassian product (" + kind + ", " + tool + "). jira-dev-harness never writes to Jira on its own: allow only if you intended this exact action now.");
+    }
   }
 
   // 4. Workflow sessions: everyone except an authorized Developer.

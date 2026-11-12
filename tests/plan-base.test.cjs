@@ -2,7 +2,7 @@
 // the uncommitted paths, `approve` checks the base and signs it into the
 // approval, and the read-only `worktree-status` command reports it. Legacy
 // records (without a base) are still readable but never authorize a
-// worktree. Every repository lives under "React Apps/jadwa app".
+// worktree. Every repository lives under "React Apps/demo app".
 // Run with: node --test
 
 "use strict";
@@ -16,7 +16,7 @@ const W = require("../scripts/lib/worktree.cjs");
 const L = require("../scripts/lib/approval.cjs");
 const { SITE, KEY, git, makeFixture } = require("./helpers.cjs");
 
-const REPO_DIR = path.join("React Apps", "jadwa app");
+const REPO_DIR = path.join("React Apps", "demo app");
 const planText = (key) => `# Plan ${key}\n\nReadiness: READY\n\n## Files likely to change\n- \`src/app.js\`\n`;
 
 function fixture() {
@@ -213,7 +213,7 @@ test("worktree-status is read-only and reports NONE, VERIFIED, and NOT VERIFIED"
   const head = git(f.repo, "rev-parse", "HEAD");
   const { hash } = f.save();
   f.approve(1, hash);
-  const wt = `${fs.realpathSync.native(path.dirname(f.repo)).replace(/\\/g, "/")}/jadwa app-${KEY}`;
+  const wt = `${fs.realpathSync.native(path.dirname(f.repo)).replace(/\\/g, "/")}/demo app-${KEY}`;
 
   const quiet = (fn) => {
     const data = tree(f.data);
@@ -274,7 +274,7 @@ test("worktree-status for a ticket without a plan, and for invalid input", () =>
 });
 
 test("printable output replaces control characters and keeps spaces and non-ASCII", () => {
-  assert.equal(W.printable("C:/React Apps/jadwa app-ABC-1"), "C:/React Apps/jadwa app-ABC-1");
+  assert.equal(W.printable("C:/React Apps/demo app-ABC-1"), "C:/React Apps/demo app-ABC-1");
   assert.equal(W.printable("é/ü"), "é/ü");
   assert.equal(W.printable("a\nWORKTREE: VERIFIED\u001b[2J\r"), "a?WORKTREE: VERIFIED?[2J?");
 });

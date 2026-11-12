@@ -416,7 +416,9 @@ function push(dataDir, state) {
 
 // Turns the drafted title and body into the exact text that will be used.
 // The Jira link and the review evidence are always added by the plugin.
-function prepare(dataDir, state, draftText) {
+// `reviewShareUrl`: a recorded, verified claude.ai artifact URL of the
+// review's sanitized share view, or null. It is quoted, never invented.
+function prepare(dataDir, state, draftText, reviewShareUrl = null) {
   requireShipping(state, "pushed");
   const problem = committedProblem(dataDir, state);
   if (problem) fail(`pull request refused: ${problem}`);
@@ -429,6 +431,7 @@ function prepare(dataDir, state, draftText) {
   if (R.redact(`${title}\n${body}`) !== `${title}\n${body}`) fail("the pull request text appears to contain a credential");
   if (!body.includes(state.jiraUrl)) body = `${body}\n\nJira: ${state.jiraUrl}`.trim();
   body += `\n\n---\nPlan: ${state.issueKey} r${state.revision} (${state.sha256})\nIndependent review: ${state.reviewId} PASS (${state.reviewSha256}), approved by the developer before this commit.`;
+  if (reviewShareUrl) body += `\nReview report (read-only copy): ${reviewShareUrl}`;
   return { ...state, prepared: { title, body, bodySha256: L.sha256Of(body) } };
 }
 

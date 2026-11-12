@@ -3,7 +3,7 @@
 // implementation -> independent review -> developer review approval ->
 // commit -> push -> pull request -> worktree removal -> merge verification
 // -> merge (mocked provider) -> merged stage. Disposable repositories under
-// "React Apps/jadwa app", a local bare origin, and mocked GitHub responses fed
+// "React Apps/demo app", a local bare origin, and mocked GitHub responses fed
 // through the real evidence hook. No Jira, GitHub, or network is involved.
 // Run with: node --test
 
@@ -56,7 +56,7 @@ test("offline end-to-end: ticket to merge, through the signed sibling worktree",
   const first = f.run(["implement-start", f.data, f.sid("impl"), KEY, "r1", planHash]).out;
   assert.match(first, /WORKTREE CREATED[\s\S]*ACCESS NEEDED/);
   const wt = /^Worktree: (.+)$/m.exec(first)[1];
-  assert.equal(path.basename(wt), `jadwa app-${KEY}`);
+  assert.equal(path.basename(wt), `demo app-${KEY}`);
   assert.equal(path.dirname(wt), slash(fs.realpathSync.native(path.dirname(f.repo))));
   assert.ok(first.includes(`/add-dir "${wt}"`));
   assert.match(f.run(["implement-start", f.data, f.sid("impl"), KEY, "r1", planHash]).out, /IMPLEMENTATION: AUTHORIZED/);

@@ -1,0 +1,4 @@
+# Per-developer local configuration and runtime data
+.claude/
+CLAUDE.local.md
+node_modules/

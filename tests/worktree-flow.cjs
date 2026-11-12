@@ -1,5 +1,5 @@
 // Shared Phase 8C fixtures: a ticket taken through the worktree workflow up
-// to a chosen point, in a repository under "React Apps/jadwa app" with a
+// to a chosen point, in a repository under "React Apps/demo app" with a
 // local bare origin, plus mocked GitHub provider responses fed through the
 // real evidence hook. No network, Jira, or GitHub is involved.
 
@@ -11,7 +11,7 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 const { ROOT, SITE, KEY, git, makeFixture, draft, reviewJson } = require("./helpers.cjs");
 
-const REPO_DIR = path.join("React Apps", "jadwa app");
+const REPO_DIR = path.join("React Apps", "demo app");
 const PLAN = `# Implementation plan: ${KEY} export two\n\nTicket: ${KEY} (${SITE})\nReadiness: READY\n\n## Acceptance criteria\n1. src/app.js exports 2.\n\n## Existing worktree changes\nNone\n\n## Files likely to change\n- \`src/app.js\`\n\n## Testing and validation\n- \`node -v\`\n\n## Proposed project-rule updates\nNone\n\n## Open questions and blockers\nNone\n`;
 const CHECK = `node -e "process.exit(require('./src/app.js') === 2 ? 0 : 1)"`;
 const PR = 7;

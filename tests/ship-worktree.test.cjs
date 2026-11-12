@@ -2,7 +2,7 @@
 // verification for tickets implemented in their signed sibling worktree.
 // Everything runs against disposable repositories and a local bare "origin";
 // pull requests are recorded through the MCP route (no provider is called).
-// Every repository lives under "React Apps/jadwa app".
+// Every repository lives under "React Apps/demo app".
 // Run with: node --test
 
 "use strict";
@@ -15,7 +15,7 @@ const L = require("../scripts/lib/approval.cjs");
 const M = require("../scripts/lib/merge.cjs");
 const { STORE, SITE, KEY, git, makeFixture, draft, reviewJson, reviewed: legacyReviewed, guard, uuid } = require("./helpers.cjs");
 
-const REPO_DIR = path.join("React Apps", "jadwa app");
+const REPO_DIR = path.join("React Apps", "demo app");
 const PLAN = `# Plan ${KEY}\n\nReadiness: READY\n\n## Files likely to change\n- \`src/app.js\`\n\n## Testing and validation\n- \`node -v\`\n`;
 const CHECK = `node -e "process.exit(require('./src/app.js') === 2 ? 0 : 1)"`;
 const PR = 7;

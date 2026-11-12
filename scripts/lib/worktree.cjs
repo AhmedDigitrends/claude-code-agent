@@ -3,8 +3,8 @@
 // Every approved ticket is implemented in its own worktree next to the main
 // checkout, never inside it:
 //
-//   React/jadwa            the developer's main checkout (never changed here)
-//   React/jadwa-JAD-101    worktree for JAD-101 on branch jira/JAD-101
+//   web/app            the developer's main checkout (never changed here)
+//   web/app-PROJ-101    worktree for PROJ-101 on branch jira/PROJ-101
 //
 // This module creates and verifies those worktrees. It runs git only with
 // fixed arguments, and never removes, resets, or cleans anything.

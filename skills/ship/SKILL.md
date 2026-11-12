@@ -100,7 +100,10 @@ transport that is already authorized on this machine.
 2. Prepare it:
    `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ship-prepare-pr "${CLAUDE_PLUGIN_DATA}" <session id> "<draft path>"`
 
-   It prints the exact repository, head, base, title, and body to use.
+   It prints the exact repository, head, base, title, and body to use. If
+   a sanitized review report was published and recorded for this exact
+   review (`/jira-dev-harness:review`, Step 5), the body already links it;
+   otherwise it says so and no link is added. Never add a link yourself.
 3. **Discover the developer's GitHub MCP tools. Never assume their
    names.** Use ToolSearch to list the tools of the GitHub MCP server that
    is connected in this session. Read their descriptions and schemas.

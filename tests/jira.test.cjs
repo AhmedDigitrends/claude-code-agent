@@ -410,7 +410,7 @@ test("mapping-check reads the committed mapping", () => {
 test("guard: Jira writes are denied before authorization, before a plan, and in other workflow modes", () => {
   const f = synced();
   const noSession = uuid();
-  assert.equal(gw(f, noSession, T("transitionJiraIssue"), transitionInput).permissionDecision, "(none)", "a session that never ran a workflow command is untouched");
+  assert.equal(gw(f, noSession, T("transitionJiraIssue"), transitionInput).permissionDecision, "ask", "a session that never ran a workflow command still needs a prompt for a Jira write");
   for (const sid of [f.sid("impl"), f.sid("review")]) {
     assert.equal(gw(f, sid, T("transitionJiraIssue"), transitionInput).permissionDecision, "deny", "other workflow modes keep the Jira write ban");
   }
@@ -418,6 +418,56 @@ test("guard: Jira writes are denied before authorization, before a plan, and in 
   const d = gw(f, sid, T("transitionJiraIssue"), transitionInput);
   assert.equal(d.permissionDecision, "deny");
   assert.match(d.permissionDecisionReason, /jira-plan first/);
+});
+
+test("guard: outside a workflow, every Atlassian write needs a prompt and reads are untouched", () => {
+  const f = synced();
+  const sid = uuid();
+  const writes = [
+    ["transitionJiraIssue", transitionInput],
+    ["addCommentToJiraIssue", { cloudId: "c", issueIdOrKey: "ZZ-1", commentBody: "x" }],
+    ["addOrEditJiraIssueComment", { cloudId: "c", issueIdOrKey: "ZZ-1", commentBody: "x" }],
+    ["editJiraIssue", { cloudId: "c", issueIdOrKey: "ZZ-1", fields: { summary: "x" } }],
+    ["createJiraIssue", { cloudId: "c", projectKey: "ZZ" }],
+    ["updateConfluenceContent", { cloudId: "c" }],
+    ["executeWrite", { operation: "addCommentToJiraIssue", params: {} }],
+    ["executeDestructive", { operation: "deleteIssue", params: {} }],
+    ["someNewUnknownOperation", {}],
+  ];
+  for (const [name, input] of writes) {
+    for (const prefix of ["mcp__atlassian__", "mcp__claude_ai_Atlassian_MCP__"]) {
+      assert.equal(gw(f, sid, prefix + name, input).permissionDecision, "ask", prefix + name);
+    }
+    assert.equal(gw(f, sid, T(name), input, { permission_mode: "bypassPermissions" }).permissionDecision, "deny", name + " without a possible prompt");
+    assert.equal(gw(f, sid, T(name), input, { permission_mode: "dontAsk" }).permissionDecision, "deny", name + " in don't-ask mode");
+  }
+  for (const [name, input] of [["getJiraIssue", { issueIdOrKey: "ZZ-1" }], ["searchJiraIssuesUsingJql", { jql: "assignee = currentUser()" }], ["atlassianUserInfo", {}], ["atlassianHome", {}], ["discover", { query: "x" }], ["searchConfluence", {}], ["getAccessibleAtlassianResources", {}], ["executeRead", { operation: "getJiraIssue", params: {} }], ["getTransitionsForJiraIssue", {}]]) {
+    assert.equal(gw(f, sid, T(name), input).permissionDecision, "(none)", name + " stays a plain read");
+  }
+  assert.equal(gw(f, sid, "mcp__github__get_me", {}).permissionDecision, "(none)", "non-Atlassian tools are untouched here");
+  assert.equal(gw(f, sid, "Bash", { command: "git status" }).permissionDecision, "(none)");
+});
+
+test("guard failures: bad input and unreadable workflow state block Jira writes", () => {
+  const f = synced();
+  const bad = spawnSync("node", [path.join(ROOT, "scripts", "guard.cjs")], { input: "{not json", env: f.env, encoding: "utf8" });
+  assert.equal(JSON.parse(bad.stdout).hookSpecificOutput.permissionDecision, "deny", "malformed hook input is refused");
+  const sid = uuid();
+  fs.mkdirSync(path.join(f.data, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(f.data, "sessions", sid + ".json"), "{corrupt");
+  assert.equal(gw(f, sid, T("addCommentToJiraIssue"), { cloudId: "c", issueIdOrKey: KEY, commentBody: "x" }).permissionDecision, "deny", "a corrupt session record is treated as a restricted workflow");
+});
+
+test("guard failures: an unexpected crash blocks the call, and the hook is configured to fail closed", () => {
+  const f = synced();
+  const pre = path.join(f.base, "crash-preload.cjs");
+  fs.writeFileSync(pre, `require(${JSON.stringify(path.join(ROOT, "scripts", "lib", "jira-gate.cjs"))}).classifyCall = () => { throw new Error("boom"); };`);
+  const r = spawnSync("node", ["-r", pre, path.join(ROOT, "scripts", "guard.cjs")], {
+    input: JSON.stringify({ session_id: uuid(), tool_name: T("addCommentToJiraIssue"), tool_input: {}, permission_mode: "default" }), env: f.env, encoding: "utf8",
+  });
+  assert.equal(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision, "deny", r.stdout + r.stderr);
+  const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, "hooks", "hooks.json"), "utf8")).hooks;
+  assert.equal(hooks.PreToolUse[0].hooks[0].onFailure, "block", "Claude Code otherwise lets the call through when the guard cannot run");
 });
 
 test("end to end: plan, guarded writes, executed and failed hooks, confirmation, and the audit trail", () => {

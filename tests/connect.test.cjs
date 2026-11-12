@@ -168,13 +168,13 @@ test("guard: Claude cannot record a confirmation, but can run the read-only repo
 // guard never sees them.) So each injected command must be covered.
 const frontmatterTools = (text) => {
   const line = /^allowed-tools:\s*(.+)$/m.exec(text);
-  return line ? [...line[1].matchAll(/(Bash|PowerShell)\((.*?)\)(?=\s|$)/g)].map((m) => ({ tool: m[1], pattern: m[2].split("${CLAUDE_PLUGIN_ROOT}").join("d:/dev ahmed/agent/plugin-code-automate") })) : [];
+  return line ? [...line[1].matchAll(/(Bash|PowerShell)\((.*?)\)(?=\s|$)/g)].map((m) => ({ tool: m[1], pattern: m[2].split("${CLAUDE_PLUGIN_ROOT}").join("d:/dev work/agent/plugin-root") })) : [];
 };
 const covered = (tools, tool, command) => tools.some((t) => t.tool === tool && new RegExp(`^${t.pattern.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(command));
 
 test("regression: every command a skill injects is covered by that skill's allowed-tools", () => {
-  const root = "d:\\dev ahmed\\agent\\plugin-code-automate";
-  const data = "C:/Users/Abc/.claude/plugins/data/jira-dev-harness-inline";
+  const root = "d:\\dev work\\agent\\plugin-root";
+  const data = "C:/Users/dev/.claude/plugins/data/jira-dev-harness-inline";
   const sid = "46c95d7a-5d29-4d8a-97b3-271f88bf321e";
   const subst = (s, args) => s.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, root.replace(/\\/g, "/")).replace(/\$\{CLAUDE_PLUGIN_DATA\}/g, data).replace(/\$\{CLAUDE_SESSION_ID\}/g, sid).replace(/\$ARGUMENTS/g, args).trim();
   let injected = 0;
@@ -192,25 +192,25 @@ test("regression: every command a skill injects is covered by that skill's allow
   }
   assert.ok(injected >= 12, "found the injected commands of every skill");
   // The command from the observed failure, verbatim in shape.
-  const observed = `node "d:/dev ahmed/agent/plugin-code-automate/scripts/connect.cjs" begin "${data}" "${sid}"`;
+  const observed = `node "d:/dev work/agent/plugin-root/scripts/connect.cjs" begin "${data}" "${sid}"`;
   const connect = frontmatterTools(fs.readFileSync(path.join(ROOT, "skills", "connect", "SKILL.md"), "utf8"));
   assert.ok(covered(connect, "Bash", observed));
   assert.ok(covered(connect, "PowerShell", observed));
   assert.ok(!covered(connect, "Bash", `node "d:/x/other.cjs" begin "${data}" "${sid}"`), "no broad Node exemption");
-  assert.ok(!covered(connect, "Bash", `node "d:/dev ahmed/agent/plugin-code-automate/scripts/plan-store.cjs" approve "${data}" "${sid}"`), "no plan-store exemption");
+  assert.ok(!covered(connect, "Bash", `node "d:/dev work/agent/plugin-root/scripts/plan-store.cjs" approve "${data}" "${sid}"`), "no plan-store exemption");
 });
 
 test("guard: real hook payload format (mixed slashes, the live data directory) for the report, and the injected begin is still not Claude's to run", () => {
   const f = makeFixture();
-  const data = "C:/Users/Abc/.claude/plugins/data/jira-dev-harness-inline";
+  const data = "C:/Users/dev/.claude/plugins/data/jira-dev-harness-inline";
   f.env.CLAUDE_PLUGIN_DATA = data;
   const sid = "46c95d7a-5d29-4d8a-97b3-271f88bf321e";
-  const script = "d:\\dev ahmed\\agent\\plugin-code-automate/scripts/connect.cjs";
+  const script = "d:\\dev work\\agent\\plugin-root/scripts/connect.cjs";
   const payload = (command, tool_name = "Bash") => ({ session_id: sid, hook_event_name: "PreToolUse", permission_mode: "default", cwd: f.repo, tool_name, tool_input: { command } });
-  const facts = "C:\\Users\\Abc\\AppData\\Local\\Temp\\jira-dev-harness\\connect\\facts-e195ba281581.json";
+  const facts = "C:\\Users\\dev\\AppData\\Local\\Temp\\jira-dev-harness\\connect\\facts-e195ba281581.json";
   assert.equal(guard(f, payload(`node "${script}" evaluate "${data}" "${sid}" "${facts}"`)).permissionDecision, "(none)");
   assert.equal(guard(f, payload(`node "${script}" evaluate "${data.replace(/\//g, "\\")}" "${sid}" "${facts}"`)).permissionDecision, "(none)", "backslash spelling of the same directory");
-  assert.equal(guard(f, payload(`node "${script}" evaluate "C:/Users/Abc/.claude/plugins/data/other" "${sid}" "${facts}"`)).permissionDecision, "deny");
+  assert.equal(guard(f, payload(`node "${script}" evaluate "C:/Users/dev/.claude/plugins/data/other" "${sid}" "${facts}"`)).permissionDecision, "deny");
   assert.equal(guard(f, payload(`node "${script}" begin "${data}" "${sid}"`)).permissionDecision, "deny");
   assert.equal(guard(f, payload(`cd . && node "${script}" evaluate "${data}" "${sid}" "${facts}"`)).permissionDecision, "deny");
   assert.equal(guard(f, payload(`node "${script}" evaluate "${data}" "${sid}" "${facts}" > x`)).permissionDecision, "deny");

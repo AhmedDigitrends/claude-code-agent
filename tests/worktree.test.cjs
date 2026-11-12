@@ -1,7 +1,7 @@
 // Phase 8C step 1: sibling worktree creation, verification, the signed
 // binding, and the safety checks around them. Every fixture repository lives
-// in a path with spaces ("React Apps/jadwa app"), so the worktree is
-// "React Apps/jadwa app-ABC-1". No network, Jira, or GitHub is involved.
+// in a path with spaces ("React Apps/demo app"), so the worktree is
+// "React Apps/demo app-ABC-1". No network, Jira, or GitHub is involved.
 // Run with: node --test
 
 "use strict";
@@ -15,7 +15,7 @@ const W = require("../scripts/lib/worktree.cjs");
 const L = require("../scripts/lib/approval.cjs");
 const { ROOT, SITE, KEY, git, makeFixture } = require("./helpers.cjs");
 
-const REPO_DIR = path.join("React Apps", "jadwa app");
+const REPO_DIR = path.join("React Apps", "demo app");
 const slash = (p) => p.replace(/\\/g, "/");
 
 const planText = (key) => `# Plan ${key}\n\nReadiness: READY\n\n## Files likely to change\n- \`src/app.js\`\n\n## Testing and validation\n- \`node -v\`\n`;
@@ -44,7 +44,7 @@ function fixture(setup) {
   f.head = git(f.repo, "rev-parse", "HEAD");
   f.hash = approvePlan(f, KEY);
   f.parent = path.dirname(f.repo);
-  f.wt = slash(path.join(fs.realpathSync.native(f.parent), `jadwa app-${KEY}`));
+  f.wt = slash(path.join(fs.realpathSync.native(f.parent), `demo app-${KEY}`));
   f.opts = (over = {}) => ({
     site: SITE, key: KEY, revision: 1, planSha256: f.hash, baseHead: f.head,
     plannedFiles: ["src/app.js"], mainRoot: f.repo, ...over,
@@ -81,7 +81,7 @@ test("the worktree path is a sibling named <project>-<KEY>, also with spaces", (
   const f = fixture();
   const p = W.pathFor(f.repo, KEY);
   assert.equal(p.path, f.wt);
-  assert.equal(p.name, `jadwa app-${KEY}`);
+  assert.equal(p.name, `demo app-${KEY}`);
   assert.ok(W.samePath(p.parent, fs.realpathSync.native(f.parent)));
   assert.throws(() => W.pathFor(f.repo, "abc-1"), /invalid issue key/);
   assert.throws(() => W.pathFor(f.repo, "../ABC-1"), /invalid issue key/);
@@ -92,7 +92,7 @@ test("collisions: any existing entry, in any letter case, blocks the path", () =
   const f = fixture();
   const p = W.pathFor(f.repo, KEY);
   assert.equal(W.collisionProblem(p.parent, p.name), null);
-  fs.writeFileSync(path.join(p.parent, `JADWA APP-abc-1`), "x");
+  fs.writeFileSync(path.join(p.parent, `DEMO APP-abc-1`), "x");
   assert.match(W.collisionProblem(p.parent, p.name), /already exists as a file \(same name in a different letter case/);
 });
 
@@ -153,7 +153,7 @@ test("create: worktree on jira/<KEY> at the approved base, signed binding, main 
   for (const k of ["head", "branch", "status", "index", "env"]) assert.deepEqual(after[k], before[k], k);
   const added = after.refs.split("\n").filter((l) => !before.refs.split("\n").includes(l));
   assert.deepEqual(added, [`refs/heads/jira/${KEY} ${f.head}`], "the only new ref is the ticket branch at the base");
-  assert.deepEqual(after.siblings.split("|").sort(), [...before.siblings.split("|"), `jadwa app-${KEY}`].sort());
+  assert.deepEqual(after.siblings.split("|").sort(), [...before.siblings.split("|"), `demo app-${KEY}`].sort());
 
   // Dependency report: reported, never copied.
   assert.deepEqual(r.dependencies.missing, [".env", "node_modules/"]);
@@ -288,9 +288,9 @@ test("refused for an existing branch, directory, case variant, junction, or fore
   refused(f, () => W.create(f.data, f.opts()), /already exists as a directory\. Nothing was changed/);
   fs.rmdirSync(f.wt);
 
-  fs.mkdirSync(path.join(f.parent, `jadwa app-abc-1`));
+  fs.mkdirSync(path.join(f.parent, `demo app-abc-1`));
   refused(f, () => W.create(f.data, f.opts()), /different letter case/);
-  fs.rmdirSync(path.join(f.parent, `jadwa app-abc-1`));
+  fs.rmdirSync(path.join(f.parent, `demo app-abc-1`));
 
   const elsewhere = path.join(f.base, "elsewhere");
   fs.mkdirSync(elsewhere);
@@ -395,7 +395,7 @@ test("two tickets get separate sibling worktrees concurrently", async () => {
   ]);
   assert.deepEqual(results, ["CREATED", "CREATED"]);
   const paths = W.listWorktrees(f.repo).map((w) => w.path).sort();
-  assert.deepEqual(paths.slice(1).map((p) => path.basename(p)), ["jadwa app-ABC-1", "jadwa app-ABC-2"]);
+  assert.deepEqual(paths.slice(1).map((p) => path.basename(p)), ["demo app-ABC-1", "demo app-ABC-2"]);
   assert.deepEqual(W.verify(f.data, SITE, "ABC-2", f.repo).problems, []);
   assert.equal(W.registeredPaths(f.data).length, 2);
 });

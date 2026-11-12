@@ -2,7 +2,7 @@
 description: Independently review an implemented jira-dev-harness plan with the read-only Opus Reviewer, run the project's declared checks as recorded evidence, and produce an HTML test report. Only the developer can run this; Claude cannot invoke it.
 argument-hint: <ISSUE-KEY>
 disable-model-invocation: true
-allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-start *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-save *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-status *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-save *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-status *)
+allowed-tools: Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-start *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-save *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-status *) Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-share-record *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-share-record *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" draft-path *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-save *) PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-status *)
 ---
 
 # Independent review (Phase 5)
@@ -133,9 +133,42 @@ Do not add your own assessment.
      required checks prevent a PASS
 
    It then saves immutable JSON, HTML, and Markdown records outside the
-   repository.
+   repository, plus a sanitized share view (`review-<id>.share.html`, path
+   printed as "Share view").
 
-## Step 5: Report and stop
+## Step 5: Optional shareable report (only with the developer's consent)
+
+The share view is a read-only copy for people who should see the result:
+verdict, acceptance criteria, test cases grouped as Passed, Failed, Blocked,
+and Not Run, check results, findings, and the review SHA-256. It omits raw
+check logs, check commands, local paths, the repository location and
+remote, links, and credentials. It is never what gets approved.
+
+1. **Ask first.** Tell the developer exactly what the share view contains
+   and omits (above), that it is uploaded to claude.ai, and that it starts
+   private. Ask: "Publish the sanitized review report as a claude.ai
+   artifact?" Continue only on an explicit yes. Anything else means: do not
+   publish, and go to Step 6.
+2. **Publish only the share view.** Use Claude Code's `Artifact` tool to
+   publish exactly the "Share view" file that `review-save` printed, as a
+   new artifact, with no other files, assets, or capabilities, and with the
+   page's own title. Do not edit, rewrite, or summarize the file. The guard
+   refuses anything else and asks the developer to confirm the upload.
+3. **Record the real URL.** Only if the Artifact tool returned a URL, run:
+   `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" review-share-record "${CLAUDE_PLUGIN_DATA}" <session id> <the URL exactly as returned>`
+   A pull request created later for this review links it automatically.
+4. **Public access.** Artifacts start private. To let anyone with the link
+   read it, the developer opens the artifact on claude.ai and chooses public
+   link sharing there; on Team and Enterprise plans that works only if an
+   organization owner allows external sharing. You cannot change sharing.
+   Say this plainly.
+5. **If publishing is unavailable** (the Artifact tool is missing, disabled
+   by settings or policy, the session has no claude.ai login, or the upload
+   fails or is declined), say so with the reason shown, and point to the
+   local HTML report as the record. **Never invent or guess a URL**, and
+   never record one the tool did not return.
+
+## Step 6: Report and stop
 
 Tell the developer:
 
@@ -145,6 +178,8 @@ Tell the developer:
 - the checks that were run, failed, unavailable, or denied
 - where the HTML report is, and how to open it, using the command
   `review-save` printed
+- the shareable review URL if one was published and recorded in Step 5,
+  or that none was published and why
 
 Explain:
 

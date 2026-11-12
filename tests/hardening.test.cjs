@@ -1,7 +1,7 @@
 // Pre-release hardening (Phase 8C): regression tests for the issues found in
 // the audit of --end-session, ignored-file removal, post-removal merge
 // checks, re-planning, ship-record chains, and legacy fallbacks. Disposable
-// repositories under "React Apps/jadwa app" and a local bare origin only.
+// repositories under "React Apps/demo app" and a local bare origin only.
 // Run with: node --test
 
 "use strict";

@@ -263,5 +263,5 @@ test("the ticket skill keeps selection explicit and every gate in place", () => 
 
 test("the skill names no company, site, project, board, or account", () => {
   const all = SKILL + fs.readFileSync(path.join(ROOT, "scripts", "lib", "discover.cjs"), "utf8");
-  assert.doesNotMatch(all, /digitrends|build ?asia|\bBA-\d|1518|@digitrends|ahmed/i);
+  assert.doesNotMatch(all, /@[a-z0-9-]+\.(com|us|io)\b|\bboard\s*(id)?\s*[:=]?\s*\d{3,}/i);
 });

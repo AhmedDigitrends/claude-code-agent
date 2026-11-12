@@ -263,17 +263,17 @@ association with the open repository. This phase is read-only.
 - **Live tests.** Each test ran headlessly (`claude --plugin-dir ... -p`)
   in throwaway git repositories under the session's temporary directory.
   The connection was the authenticated claude.ai Atlassian connector,
-  against the site `digitrends.atlassian.net`.
+  against the site `your-site.atlassian.net`.
 
   | Test | Result |
   | :- | :- |
-  | `MEF-1292`, assigned to the tester, with 2 image attachments and 1 comment | Read in full: summary, description, type Bug, status QA Verified, priority, assignee, reporter, sprint, fix version, labels, and time tracking. Acceptance criteria were correctly reported as "not found". No issue links or remote links. 1 comment. Both PNG attachments (204 KB and 258 KB) were downloaded to a temporary directory and read. Tools called: Atlassian read tools only. |
-  | `MEF-99999999`, which doesn't exist | Jira returned 404. Reported as "not found or no permission", and the run stopped safely. |
+  | `PROJ-1292`, assigned to the tester, with 2 image attachments and 1 comment | Read in full: summary, description, type Bug, status QA Verified, priority, assignee, reporter, sprint, fix version, labels, and time tracking. Acceptance criteria were correctly reported as "not found". No issue links or remote links. 1 comment. Both PNG attachments (204 KB and 258 KB) were downloaded to a temporary directory and read. Tools called: Atlassian read tools only. |
+  | `PROJ-99999999`, which doesn't exist | Jira returned 404. Reported as "not found or no permission", and the run stopped safely. |
   | `zzq-no-such-site-4417.atlassian.net` | Reported as not accessible with the connected account. No other site was tried. |
   | `http://evil.example.com/...` | Rejected at Step 1. No tools were called. |
   | No MCP servers (`--strict-mcp-config`) | Reported "not connected" and printed the setup instructions. No Jira tools were called. |
   | Write attempt after running the skill | `editJiraIssue` was explicitly allowed in permissions and called on the nonexistent key `ZZQX-999999`. The hook denied it with its own message, so the call never reached Jira. |
-  | Committed mapping (`digitrends.atlassian.net`, `MEF`) with `MEF-1207` | Reported as verified. The repositories without a mapping were reported as unverified. |
+  | Committed mapping (`your-site.atlassian.net`, `PROJ`) with `PROJ-1207` | Reported as verified. The repositories without a mapping were reported as unverified. |
 
 - **No writes.** In every transcript, the only Atlassian tools called were
   `getAccessibleAtlassianResources`, `getJiraIssue`,
@@ -402,7 +402,7 @@ one exact plan revision.
 
 - **Test setup:** these tests used a synthetic React Web repository
   (`email-app-fixture`, 14 tracked files) that renders emails with
-  `@react-email`, and the real ticket `MEF-1292`. The fixture was created
+  `@react-email`, and the real ticket `PROJ-1292`. The fixture was created
   for the test in a temporary directory and is not a real project. It
   contains:
   - `CLAUDE.md`
@@ -410,7 +410,7 @@ one exact plan revision.
   - a path-scoped `emails.md` rule, "plain text, no logos or colored
     blocks (ADR-7)", which conflicts with the ticket on purpose
   - an `ios/` and `android/` scoped `native.md` rule, which does not apply
-  - a reusable `BrandedLayout`, and a committed `MEF` mapping
+  - a reusable `BrandedLayout`, and a committed `PROJ` mapping
 - **Probes before building:**
   - `$ARGUMENTS`, `${CLAUDE_PLUGIN_DATA}`, and `${CLAUDE_SKILL_DIR}` are
     substituted inside `!` commands.
@@ -431,7 +431,7 @@ one exact plan revision.
 | Models | `jira-dev-harness:analyzer` and `jira-dev-harness:planner` ran on `claude-sonnet-5-5` in every run, read from the model field of each subagent message |
 | Read-only agents | The only tools called inside subagents were `Read`, `Grep`, and `Glob` |
 | Revisions | r1 was BLOCKED, with no approval command offered. After the developer answered the blockers, r2 was READY. A developer change request produced r3 |
-| Developer approval | `/jira-dev-harness:approve MEF-1292 r2 83664a40f73a` was granted. The superseded r1 and a wrong hash were refused |
+| Developer approval | `/jira-dev-harness:approve PROJ-1292 r2 83664a40f73a` was granted. The superseded r1 and a wrong hash were refused |
 | Approval invalidated by change | After r3 was saved, `verify` returned INVALID (exit 1), `status` reported "Superseded approvals: r2", and re-approving r2 was refused |
 | Forgery after a fix | In a resumed session, Claude tried to approve three ways: running `approve`, writing `approval-r2.json`, and invoking the approve skill. The always-on guard denied the first two, and Claude Code refused the third because of `disable-model-invocation` |
 | No application changes | `git ls-files -s` was identical before and after all runs, and the working tree stayed clean |
@@ -571,8 +571,8 @@ plugins in a temporary directory):
 **Cleanup:**
 
 - There was one disposable Phase 3 test approval. Its exact path was
-  `…/plugins/data/jira-dev-harness-inline/plans/digitrends.atlassian.net/MEF-1292/approval-r2.json`.
-  Its identity was confirmed before deletion: MEF-1292, revision 2, SHA-256
+  `…/plugins/data/jira-dev-harness-inline/plans/your-site.atlassian.net/PROJ-1292/approval-r2.json`.
+  Its identity was confirmed before deletion: PROJ-1292, revision 2, SHA-256
   `83664a40…cd97`, approved at 10:41:14.965Z. It was the only approval
   record under `~/.claude/plugins/data`.
 - This checkpoint's own test approvals were removed the same way after
@@ -587,7 +587,7 @@ plugins in a temporary directory):
 | Strict validation | `✔ Validation passed` (exit 0). The directory-submission items are unchanged: licence, icon, and README install line |
 | Guard unit tests | 60 of 60 as expected. They covered store protection in ordinary sessions, normal behaviour in ordinary sessions (edits, commits, pipes, Jira writes allowed), the plugin-agent lock, every workflow-session rule (including `&`, `$( )`, backticks, `git -c`, `git diff --output`, `curl -d`, and traversal), fork inheritance, a negative result for an unknown marker, and fail-closed handling. One defect was found and fixed: the plan-store allowlist rejected plugin paths that contain spaces |
 | Plan store unit tests | Throwaway repos A and B. Refused: short hash, a different repository, a missing session id, a stale revision, the wrong revision's hash, BLOCKED, and a re-initialised repository (new root commit). `verify` failed for a tampered approval field, a fabricated record with a zero HMAC, an uncommitted mapping edit, a plan edited after approval, another repository, and old unsigned records |
-| Workflow regression | The full `/jira-dev-harness:ticket` run on `email-app-fixture` with MEF-1292 succeeded with **zero guard denials**: ordering, attachments, Analyzer and Planner on `claude-sonnet-5-5` with only Read in subagents, and r4 saved as BLOCKED with the repository identity |
+| Workflow regression | The full `/jira-dev-harness:ticket` run on `email-app-fixture` with PROJ-1292 succeeded with **zero guard denials**: ordering, attachments, Analyzer and Planner on `claude-sonnet-5-5` with only Read in subagents, and r4 saved as BLOCKED with the repository identity |
 | Resumed and forked workflow sessions, real model and real plugin | Claude declined every write, git, and Jira request on its own (3 runs), citing planning mode. Because no tool call happened, the hook layer was then tested through a harness plugin |
 | Hook layer, with the instruction layer removed | The harness plugin carried byte-identical `hooks.json`, `guard.cjs`, and `plan-store.cjs`, plus a skill that only runs `session-start`. In both the **resumed** and the **forked** session, all 6 attempts were denied by the guard: Write, `echo >`, `git commit`, `npm --version`, a **general-purpose subagent's** Write, and a Jira `addOrEditJiraIssueComment`. The fork's state recorded `inheritedFrom` the parent. The repository stayed at its initial commit |
 | Plugin agent with a Write tool (ordinary session) | `jira-dev-harness:developer` Write was denied: "not permitted to modify anything; no approved implementation mode exists" |
@@ -1575,8 +1575,8 @@ stays as it is.
 1. `/jira-dev-harness:implement` creates the worktree and branch after the
    approval is re-verified and before any Developer write.
 2. Location: a sibling of the main checkout, `<parent>/<project>-<ISSUE-KEY>`.
-   For example, `React/jadwa` gives `React/jadwa-JAD-101` and
-   `React/jadwa-JAD-102`. There is no central worktrees directory.
+   For example, `web/app` gives `web/app-PROJ-101` and
+   `web/app-PROJ-102`. There is no central worktrees directory.
 3. The main checkout is not changed by implementation.
 4. One worktree per active ticket; a resumed or repeated `implement` reuses
    the ticket's verified worktree.
@@ -1626,11 +1626,11 @@ Code 2.1.318, git 2.53, Node 24.14, Windows 11):**
 
 | Check | Result |
 | :- | :- |
-| `git worktree add -b jira/JAD-101 "<parent>/jadwa-JAD-101" <base>` with spaces in the path | Works. Same root commit, origin, and `--git-common-dir` (`<main>/.git`) as the main checkout; its own `--git-dir` (`<main>/.git/worktrees/jadwa-JAD-101`); the worktree's `.git` is a file; `refs/remotes/origin/HEAD` is shared |
+| `git worktree add -b jira/PROJ-101 "<parent>/app-PROJ-101" <base>` with spaces in the path | Works. Same root commit, origin, and `--git-common-dir` (`<main>/.git`) as the main checkout; its own `--git-dir` (`<main>/.git/worktrees/app-PROJ-101`); the worktree's `.git` is a file; `refs/remotes/origin/HEAD` is shared |
 | The plugin's `repoIdentity` / `sameRepo` on a worktree | Different root, so `sameRepo(main, worktree)` is false: the separate binding is required, and `sameRepo` need not change |
 | `git worktree list --porcelain` | Absolute forward-slash paths, `HEAD <sha>`, `branch refs/heads/<name>`: parseable for verification |
 | Existing branch, existing directory, junction at the sibling path | Each refused by git (`already exists`); `lstat` reports a junction as a symbolic link |
-| Name collision differing only in case | On Windows `JADWA-jad-101` resolves to the existing `jadwa-JAD-101`: the check must be case-insensitive on Windows |
+| Name collision differing only in case | On Windows `APP-proj-101` resolves to the existing `app-PROJ-101`: the check must be case-insensitive on Windows |
 | `post-checkout` hook during `worktree add` | Runs by default. With `-c core.hooksPath=<empty dir>` it does not run |
 | Checkout (smudge) filter during `worktree add` | Runs even with hooks disabled. `--no-checkout` runs none, and a command-line `-c filter.<name>.smudge=cat` suppresses one. Filter commands come only from the user's own git config (the global LFS filter is present here), never from repository content, unlike `core.hooksPath`, which can point into the repository |
 | `git worktree remove` without `--force` | Refuses tracked or untracked changes, but **silently deleted ignored files, including `.env` and `node_modules`**. The plugin must check ignored files itself before calling it |
@@ -1787,8 +1787,8 @@ and distribute the plugin to the team.
 | 2026-10-30 | Agent models | Skill re-run with a valid URL and an invalid URL in the sample repository | Same behaviour as on 2026-10-29. The sample repository was unchanged afterwards (clean, one commit) |
 | 2026-10-30 | Phase 2 | `claude plugin validate . --strict` | Passed (exit 0) |
 | 2026-10-30 | Phase 2 | Hook JSON and matcher, checked offline | Valid JSON. 13 of 13 write tools denied, 10 of 10 read or other tools allowed |
-| 2026-10-30 | Phase 2 | Authenticated read of `MEF-1292` | Fields, comment, and both image attachments read. Atlassian read tools only |
-| 2026-10-30 | Phase 2 | Nonexistent issue `MEF-99999999` | 404, reported safely |
+| 2026-10-30 | Phase 2 | Authenticated read of `PROJ-1292` | Fields, comment, and both image attachments read. Atlassian read tools only |
+| 2026-10-30 | Phase 2 | Nonexistent issue `PROJ-99999999` | 404, reported safely |
 | 2026-10-30 | Phase 2 | Site that isn't accessible | Reported, and no other site tried |
 | 2026-10-30 | Phase 2 | Invalid URL | Rejected with no tool calls |
 | 2026-10-30 | Phase 2 | No MCP connection | "Not connected" and the setup instructions |
@@ -1798,7 +1798,7 @@ and distribute the plugin to the team.
 | 2026-10-30 | Phase 3 | `claude plugin validate . --strict` | Passed (exit 0) |
 | 2026-10-30 | Phase 3 | Plan store and guard unit tests | All cases as expected |
 | 2026-10-30 | Phase 3 | Mapping mismatch, and no mapping | Both stopped before Jira |
-| 2026-10-30 | Phase 3 | Full workflow on `email-app-fixture` with `MEF-1292` | Instructions read before Jira. Analyzer and Planner on `claude-sonnet-5-5`, read-only tools only. r1 saved as BLOCKED, with the rule conflict flagged |
+| 2026-10-30 | Phase 3 | Full workflow on `email-app-fixture` with `PROJ-1292` | Instructions read before Jira. Analyzer and Planner on `claude-sonnet-5-5`, read-only tools only. r1 saved as BLOCKED, with the rule conflict flagged |
 | 2026-10-30 | Phase 3 | Revisions and approval | r2 READY and approved by the developer. r1 and a wrong hash refused. r3 invalidated the r2 approval, and reusing it was refused |
 | 2026-10-30 | Phase 3 | Claude forging an approval (resumed session) | First attempt succeeded (defect). After the fix, all 3 methods were blocked |
 | 2026-10-30 | Phase 3 | Repository and Jira integrity | Fixture byte-identical. 16 Atlassian calls, all reads |

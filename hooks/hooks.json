@@ -2,11 +2,12 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Read|Grep|Glob)$|^mcp__",
+        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Read|Grep|Glob|Artifact)$|^mcp__",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.cjs\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.cjs\"",
+            "onFailure": "block"
           }
         ]
       }

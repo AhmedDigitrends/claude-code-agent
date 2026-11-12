@@ -17,7 +17,7 @@ const same = (a, b) => String(a == null ? "" : a).trim().toLowerCase() === Strin
 // -------------------------------------------------------------- tool calls
 
 const WRITE_VERB = /^(create|edit|update|transition|add|delete|remove|upload|manage|watch|convert|move|assign|link|set|bulk|archive|restore|clone|import|execute(Write|Destructive))/i;
-const READ_VERB = /^(get|list|search|lookup|discover|fetch|read|find|query)/i;
+const READ_VERB = /^(get|list|search|lookup|discover|fetch|read|find|query|atlassian(UserInfo|Home))/i;
 
 function server(tool) {
   const m = /^mcp__(.+?)__(.+)$/.exec(String(tool || ""));

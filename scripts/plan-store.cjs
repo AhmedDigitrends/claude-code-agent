@@ -35,6 +35,7 @@
 //   plan-store.cjs run-check       <dataDir> <session-id> <name> <required|optional> '<command>'
 //   plan-store.cjs review-save     <dataDir> <session-id> <draftPath>
 //   plan-store.cjs review-status   <dataDir> <ISSUE-KEY | site/ISSUE-KEY>
+//   plan-store.cjs review-share-record <dataDir> <session-id> <claude.ai artifact URL>
 //   plan-store.cjs approve-review  <dataDir> <session-id> <ISSUE-KEY | site/ISSUE-KEY> <rv-N> <sha256>
 //   plan-store.cjs ship-start      <dataDir> <session-id> <ISSUE-KEY | site/ISSUE-KEY> <rv-N> <sha256> [--branch <name>]
 //   plan-store.cjs ship-commit     <dataDir> <session-id> <draftPath>
@@ -95,7 +96,28 @@ const JS = require("./lib/jira-sync.cjs");
 const D = require("./lib/discover.cjs");
 const P = require("./lib/progress.cjs");
 const W = require("./lib/worktree.cjs");
-const { renderHtml, renderMarkdown } = require("./lib/render-review.cjs");
+const { renderHtml, renderMarkdown, renderShareHtml } = require("./lib/render-review.cjs");
+const os = require("os");
+
+// A published review artifact URL, as Claude Code's Artifact tool returns it.
+const ARTIFACT_URL_RE = /^https:\/\/claude\.ai\/(code\/)?artifact\/[A-Za-z0-9_-]{8,}$/;
+
+// The latest recorded share URL of one review, if its signed record still
+// matches the review file. Never a guess: no record, no URL.
+function shareUrlOf(dataDir, t, reviewId) {
+  const dir = R.reviewsDir(t);
+  if (!fs.existsSync(dir)) return null;
+  const reviewFile = path.join(dir, `review-${reviewId}.json`);
+  if (!fs.existsSync(reviewFile)) return null;
+  const sha = L.sha256(reviewFile);
+  const key = L.approvalKey(dataDir, false);
+  const ks = fs.readdirSync(dir).map((f) => new RegExp(`^review-${reviewId}\\.share-url-([0-9]+)\\.json$`).exec(f)).filter(Boolean).map((m) => Number(m[1])).sort((a, b) => a - b);
+  for (const k of ks.reverse()) {
+    const r = L.readJson(path.join(dir, `review-${reviewId}.share-url-${k}.json`));
+    if (r && L.signatureValid(r, key) && r.kind === "review-share-url" && r.reviewId === reviewId && r.reviewSha256 === sha && ARTIFACT_URL_RE.test(r.url)) return r;
+  }
+  return null;
+}
 
 const { fail } = L;
 
@@ -683,6 +705,17 @@ function reviewSave([dataDir, sessionId, draftFile]) {
   fs.writeFileSync(`${out}.md`, markdown, { flag: "wx" });
   fs.unlinkSync(draft);
 
+  // The sanitized, read-only share view (for an optional claude.ai artifact).
+  // It is not part of the signed review, so the review's SHA-256 and its
+  // approval are unchanged; its own hash is recorded in a signed record.
+  const reviewSha256 = L.sha256Of(json);
+  const local = [state.repo.root, state.workspace && state.workspace.path, dataDir, os.tmpdir(), os.homedir()];
+  const share = renderShareHtml(review, reviewSha256, local);
+  fs.writeFileSync(`${out}.share.html`, share, { flag: "wx" });
+  const shareRecord = { kind: "review-share-view", issueKey: facts.issueKey, site: facts.site, reviewId: facts.reviewId, reviewSha256, sha256: L.sha256Of(share), createdAt: new Date().toISOString() };
+  shareRecord.hmac = L.sign(shareRecord, L.approvalKey(dataDir, true));
+  fs.writeFileSync(`${out}.share.json`, JSON.stringify(shareRecord, null, 2) + "\n", { flag: "wx" });
+
   console.log(`REVIEW SAVED: ${facts.reviewId} for ${facts.issueKey} r${facts.planRevision}`);
   console.log(`VERDICT: ${review.verdict}${review.verdict !== review.reviewerVerdict ? ` (Reviewer said ${review.reviewerVerdict}; changed by the review rules)` : ""}`);
   for (const r of review.failReasons) console.log(`  fail: ${r}`);
@@ -693,12 +726,52 @@ function reviewSave([dataDir, sessionId, draftFile]) {
   console.log(`JSON record: ${out}.json`);
   console.log(`Markdown summary: ${out}.md`);
   console.log(`Open the HTML report in a browser, for example: start "" "${out}.html" (Windows), open "${out}.html" (macOS), xdg-open "${out}.html" (Linux).`);
-  console.log(`Review SHA-256: ${L.sha256Of(json)}`);
+  console.log(`Review SHA-256: ${reviewSha256}`);
+  console.log(`Share view (sanitized, for an optional claude.ai artifact): ${out}.share.html`);
   console.log("The verdict is valid only until the code, plan, or implementation report changes. It does not authorize a commit, push, pull request, or merge.");
   if (review.verdict === "PASS") {
     console.log("After reading the HTML report, the developer approves exactly this artifact with:");
     console.log(`/jira-dev-harness:approve-review ${facts.issueKey} ${facts.reviewId} ${L.sha256Of(json)}`);
   }
+}
+
+// Records the claude.ai artifact URL of a published share view, exactly as
+// the Artifact tool returned it, for this session's own saved review. It is
+// a link to a read-only copy, never an approval, and it is not evidence of
+// anything: shipping only quotes it in the pull request description.
+function reviewShareRecordCmd([dataDir, sessionId, url, ...extra]) {
+  dataDir = L.checkDataDir(dataDir);
+  if (extra.length) fail("usage: review-share-record <dataDir> <session-id> <artifact URL>");
+  const state = readSession(dataDir, sessionId);
+  if (!state || state.mode !== "reviewing") fail("this session has no review; the share URL is recorded in the review session that published it");
+  url = String(url || "").trim();
+  if (!ARTIFACT_URL_RE.test(url)) fail(`${url || "(none)"} is not a claude.ai artifact URL (https://claude.ai/artifact/<id> or https://claude.ai/code/artifact/<id>); record only the URL the Artifact tool returned`);
+  const t = L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`);
+  const dir = R.reviewsDir(t);
+  const reviewFile = path.join(dir, `review-${state.reviewId}.json`);
+  const viewFile = path.join(dir, `review-${state.reviewId}.share.json`);
+  if (!fs.existsSync(reviewFile)) fail(`${state.reviewId} has not been saved yet`);
+  const latest = R.latestReview(t);
+  if (!latest || latest.id !== state.reviewId) fail(`${state.reviewId} is no longer the latest review`);
+  const key = L.approvalKey(dataDir, false);
+  const view = L.readJson(viewFile);
+  const reviewSha256 = L.sha256(reviewFile);
+  if (!view || !L.signatureValid(view, key) || view.reviewSha256 !== reviewSha256) fail("the share view of this review is missing, edited, or for another review version");
+  const shareFile = path.join(dir, `review-${state.reviewId}.share.html`);
+  if (!fs.existsSync(shareFile) || L.sha256(shareFile) !== view.sha256) fail("the share view file was modified after it was generated");
+  const record = { kind: "review-share-url", issueKey: t.key, site: t.site, reviewId: state.reviewId, reviewSha256, shareViewSha256: view.sha256, url, recordedAt: new Date().toISOString(), sessionId, method: "reported by Claude from the Artifact tool result" };
+  record.hmac = L.sign(record, L.approvalKey(dataDir, true));
+  for (let k = 1; ; k += 1) {
+    try {
+      fs.writeFileSync(path.join(dir, `review-${state.reviewId}.share-url-${k}.json`), JSON.stringify(record, null, 2) + "\n", { flag: "wx" });
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+  }
+  console.log(`REVIEW SHARE URL RECORDED: ${url}`);
+  console.log(`For ${t.key} ${state.reviewId} (review SHA-256 ${reviewSha256}). It is a read-only copy; approval is still only /jira-dev-harness:approve-review with that SHA-256.`);
+  console.log("A pull request created for this review will link it. Whether people outside your account can open it depends on the sharing you set in claude.ai.");
 }
 
 function reviewStatusCmd([dataDir, ref]) {
@@ -809,7 +882,11 @@ function shipPrepareCmd([dataDir, sessionId, draftFile]) {
   dataDir = L.checkDataDir(dataDir);
   const state = shipSession(dataDir, sessionId);
   const draft = checkDraft(state.site, state.issueKey, draftFile);
-  const next = S.prepare(dataDir, state, fs.readFileSync(draft, "utf8"));
+  // A recorded share URL is quoted only when its signed record matches the
+  // review that shipping was authorized for.
+  const shared = shareUrlOf(dataDir, L.findTicketDir(dataDir, `${state.site}/${state.issueKey}`), state.reviewId);
+  const shareUrl = shared && shared.reviewSha256 === state.reviewSha256 ? shared.url : null;
+  const next = S.prepare(dataDir, state, fs.readFileSync(draft, "utf8"), shareUrl);
   writeSession(dataDir, next);
   fs.unlinkSync(draft);
   console.log("PULL REQUEST TEXT PREPARED");
@@ -817,6 +894,7 @@ function shipPrepareCmd([dataDir, sessionId, draftFile]) {
   console.log(`Head: ${next.branch}`);
   console.log(`Base: ${next.base}`);
   console.log(`Title: ${next.prepared.title}`);
+  console.log(`Review report link: ${shareUrl || "none recorded (no published review artifact; nothing is added)"}`);
   console.log("Body (use it exactly, byte for byte):");
   console.log("-----BEGIN PR BODY-----");
   console.log(next.prepared.body);
@@ -1171,6 +1249,7 @@ const commands = {
   "run-check": runCheck,
   "review-save": reviewSave,
   "review-status": reviewStatusCmd,
+  "review-share-record": reviewShareRecordCmd,
   "approve-review": approveReviewCmd,
   "ship-start": shipStartCmd,
   "ship-commit": shipCommitCmd,

@@ -102,7 +102,7 @@ Show the script's report as it is. Then add, in plain words:
   intend to use (personal or office), then type the `--confirm` command the
   report prints. You cannot do this for them.
 - **READY:** both accounts were read from live connections and the developer
-  confirmed them. They may start with `/jira-dev-harness:ticket <url>`. Say
+  confirmed them. Tell them how to continue: open the project repository in a fresh session and run `/jira-dev-harness:ticket` (they can enter a ticket ID or URL, or choose from their assigned tickets). The plan is then saved for them to read and approve before anything is implemented. Say
   that READY means this session's connections work, and does not prove that
   credentials are isolated: the report states what is known about each
   connection's credential storage.

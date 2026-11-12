@@ -1,7 +1,7 @@
 // Phase 8C step 3: /implement creates or reuses the sibling ticket worktree,
 // hands directory access to the developer (/add-dir), and the guard confines
 // the Developer Agent to that worktree. Every repository lives under
-// "React Apps/jadwa app", so the worktree is "React Apps/jadwa app-ABC-1".
+// "React Apps/demo app", so the worktree is "React Apps/demo app-ABC-1".
 // Run with: node --test
 
 "use strict";
@@ -14,7 +14,7 @@ const { spawn } = require("child_process");
 const L = require("../scripts/lib/approval.cjs");
 const { STORE, SITE, KEY, git, makeFixture, guard, legacyImplement, uuid } = require("./helpers.cjs");
 
-const REPO_DIR = path.join("React Apps", "jadwa app");
+const REPO_DIR = path.join("React Apps", "demo app");
 const slash = (p) => p.replace(/\\/g, "/");
 const planText = (key) => `# Plan ${key}\n\nReadiness: READY\n\n## Files likely to change\n- \`src/app.js\`\n\n## Testing and validation\n- \`node -v\`\n`;
 
@@ -31,7 +31,7 @@ function fixture() {
   const f = makeFixture(undefined, { repoDir: REPO_DIR });
   f.hash = approvePlan(f, KEY);
   f.parent = slash(fs.realpathSync.native(path.dirname(f.repo)));
-  f.wt = `${f.parent}/jadwa app-${KEY}`;
+  f.wt = `${f.parent}/demo app-${KEY}`;
   f.implement = (name = "impl", key = KEY, hash = f.hash) => f.run(["implement-start", f.data, f.sid(name), key, "r1", hash]).out;
   f.session = (name = "impl") => JSON.parse(fs.readFileSync(path.join(f.data, "sessions", `${f.sid(name)}.json`), "utf8"));
   f.dev = (tool, toolInput, name = "impl") => guard(f, { session_id: f.sid(name), agent_type: "jira-dev-harness:developer", tool_name: tool, tool_input: toolInput, permission_mode: "default", cwd: f.repo });
@@ -76,7 +76,7 @@ test("first /implement creates the sibling worktree and stops for /add-dir; noth
   assert.equal(s.pendingWorktree.path, f.wt);
   assert.equal(git(f.wt, "branch", "--show-current"), `jira/${KEY}`);
   assert.deepEqual(mainState(f), before, "the main checkout is unchanged");
-  assert.deepEqual(fs.readdirSync(f.parent).sort(), ["jadwa app", `jadwa app-${KEY}`], "only the sibling folder is added");
+  assert.deepEqual(fs.readdirSync(f.parent).sort(), ["demo app", `demo app-${KEY}`], "only the sibling folder is added");
   assert.equal(fs.existsSync(path.join(f.parent, ".worktrees")), false);
   assert.equal(fs.existsSync(path.join(path.dirname(f.parent), ".worktrees")), false);
   assert.equal(decision(f.dev("Write", { file_path: path.join(f.wt, "src", "app.js") })), "deny", "no Developer write before the second run");
@@ -135,7 +135,7 @@ test("a legacy plan without a signed base commit is refused and nothing is creat
   assert.match(f.run(["approve", f.data, f.sid("plan"), KEY, "r1", hash]).out, /GRANTED/);
   const out = f.run(["implement-start", f.data, f.sid("impl"), KEY, "r1", hash]).out;
   assert.match(out, /IMPLEMENTATION: REFUSED\. r1 was saved or approved by an older plugin version without a recorded base commit.*Save a new plan revision/s);
-  assert.equal(fs.existsSync(path.join(path.dirname(f.repo), `jadwa app-${KEY}`)), false);
+  assert.equal(fs.existsSync(path.join(path.dirname(f.repo), `demo app-${KEY}`)), false);
 });
 
 // -------------------------------------------------------- Developer writes
@@ -145,14 +145,14 @@ test("Developer writes: only inside the verified worktree; never the main checko
   f.authorize();
   const hash2 = approvePlan(f, "ABC-2");
   f.authorize("impl2", "ABC-2", hash2);
-  const wt2 = `${f.parent}/jadwa app-ABC-2`;
+  const wt2 = `${f.parent}/demo app-ABC-2`;
 
   assert.equal(decision(f.dev("Edit", { file_path: path.join(f.wt, "src", "app.js") })), "ask");
   assert.equal(decision(f.dev("Write", { file_path: `${f.wt}/src/new file.js` })), "ask", "paths with spaces");
   const main = f.dev("Edit", { file_path: path.join(f.repo, "src", "app.js") });
   assert.equal(decision(main), "deny");
   assert.match(main.permissionDecisionReason, /is in the main checkout .* never changes/);
-  assert.equal(decision(f.dev("Write", { file_path: path.join(f.wt, "..", "jadwa app", "src", "x.js") })), "deny", "traversal into the main checkout");
+  assert.equal(decision(f.dev("Write", { file_path: path.join(f.wt, "..", "demo app", "src", "x.js") })), "deny", "traversal into the main checkout");
   assert.equal(decision(f.dev("Write", { file_path: `${wt2}/src/app.js` })), "deny", "another ticket's worktree");
   assert.equal(decision(f.dev("Write", { file_path: `${wt2}/src/app.js` }, "impl2")), "ask", "that ticket's own Developer may");
   assert.equal(decision(f.dev("Write", { file_path: path.join(f.wt, ".git") })), "deny", "the worktree's .git file");
@@ -274,13 +274,13 @@ test("registered worktrees are protected in every session; unrelated git and del
   for (const command of [
     `git worktree remove "${f.wt}"`,
     `git worktree remove --force "${f.wt}"`,
-    `git worktree remove "../jadwa app-${KEY}"`,
+    `git worktree remove "../demo app-${KEY}"`,
     `git -C "${f.repo}" worktree move "${f.wt}" "${f.parent}/elsewhere"`,
     `git worktree repair "${f.wt}"`,
     `rm -rf "${f.wt}"`,
     `rm -r "${f.parent}"`,
-    `rm -rf "../jadwa app-"*`,
-    `cd "${f.parent}" && rm -rf "jadwa app-${KEY}"`,
+    `rm -rf "../demo app-"*`,
+    `cd "${f.parent}" && rm -rf "demo app-${KEY}"`,
   ]) assert.equal(ordinary(command), "deny", command);
   assert.equal(ordinary(`Remove-Item -Recurse -Force "${f.wt}"`, "PowerShell"), "deny");
   assert.equal(ordinary(`rmdir /s /q "${f.wt}"`), "deny");
@@ -321,9 +321,9 @@ test("concurrent tickets get their own sibling worktrees and sessions", async ()
   assert.match(b, /WORKTREE CREATED for ABC-2/);
   assert.match(f.implement("impl"), /AUTHORIZED for ABC-1/);
   assert.match(f.implement("impl2", "ABC-2", hash2), /AUTHORIZED for ABC-2/);
-  assert.deepEqual(fs.readdirSync(f.parent).sort(), ["jadwa app", "jadwa app-ABC-1", "jadwa app-ABC-2"]);
+  assert.deepEqual(fs.readdirSync(f.parent).sort(), ["demo app", "demo app-ABC-1", "demo app-ABC-2"]);
   assert.equal(f.session("impl").worktree.path, f.wt);
-  assert.equal(f.session("impl2").worktree.path, `${f.parent}/jadwa app-ABC-2`);
+  assert.equal(f.session("impl2").worktree.path, `${f.parent}/demo app-ABC-2`);
 });
 
 test("two concurrent /implement runs for one ticket give one worktree and one refusal", async () => {

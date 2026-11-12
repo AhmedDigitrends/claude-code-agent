@@ -16,7 +16,7 @@ Your task message gives:
 
 - the **reviewed workspace root**: the directory that holds the code under
   review. For a ticket implemented in its own git worktree (a sibling
-  folder such as `React/jadwa-JAD-101`), that is the worktree; the main
+  folder such as `web/app-PROJ-101`), that is the worktree; the main
   checkout does not contain the change and must not be reviewed instead.
   For a legacy in-place implementation, it is the main checkout.
 - the **review bundle** directory, with:

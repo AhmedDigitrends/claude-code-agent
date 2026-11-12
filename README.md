@@ -11,7 +11,7 @@ keeps its own rules in its own repository, and the plugin adapts to them at
 run time. Rules can live in `CLAUDE.md`, `.claude/rules/`, `AGENTS.md`, and
 similar files. Each user connects their own authorized Jira account.
 
-> **Status: Phase 7 (Jira progress automation).** The workflow has eight
+> **Status: v1.0.** The workflow has eight
 > steps:
 >
 > - The ticket skill reads your project's rules and the Jira ticket, runs
@@ -46,7 +46,7 @@ similar files. Each user connects their own authorized Jira account.
 
 ## Requirements
 
-- Claude Code 2.1 or later (CLI, or the VS Code extension)
+- Claude Code 2.1.295 or later (CLI, or the VS Code extension). Earlier versions ignore the guard hook's fail-closed setting, so a crashed guard would let a tool call through
 - Git, and a git repository with at least one commit and a committed
   [project mapping](#project-mapping). Any language or framework works.
 - A connection to the official Atlassian Rovo MCP server, for reading Jira.
@@ -65,11 +65,42 @@ similar files. Each user connects their own authorized Jira account.
 
 ## Installation
 
-The plugin is not published to a marketplace yet. Load it from a local
-checkout (see [Local testing](#local-testing)).
+The plugin is distributed from the public GitHub repository
+`AhmedDigitrends/claude-code-agent`, which is also a Claude Code
+marketplace. You need Git installed. The plugin never handles credentials.
 
-A marketplace install path (`/plugin install jira-dev-harness@<marketplace>`)
-is planned for Phase 8.
+```text
+/plugin marketplace add AhmedDigitrends/claude-code-agent
+/plugin install jira-dev-harness@jira-dev-harness-marketplace
+/reload-plugins
+```
+
+On Claude Code 2.1.275 or later, one step also works:
+`/plugin install jira-dev-harness --marketplace AhmedDigitrends/claude-code-agent`.
+
+Then connect your own accounts (see [Jira connection setup](#jira-connection-setup)
+and [GitHub integration](#github-integration)) and verify them with
+`/jira-dev-harness:connect`.
+
+**Update.** Run `/plugin marketplace update jira-dev-harness-marketplace`, then
+`/plugin update jira-dev-harness@jira-dev-harness-marketplace` and `/reload-plugins`.
+A new release bumps `version` in `.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json`.
+
+**Each project repository** needs its own committed mapping file (see
+[Project mapping](#project-mapping)). Project rules in `CLAUDE.md` and
+`.claude/rules/` are read automatically when planning and implementing; if
+there are none, the workflow continues normally.
+
+To try the plugin from a local checkout instead, see [Local testing](#local-testing).
+
+## Quick start
+
+1. Install the plugin (see [Installation](#installation)).
+2. In a fresh session, run `/jira-dev-harness:connect` and confirm your own Jira and GitHub accounts.
+3. Open your project's repository and run `/jira-dev-harness:ticket`. Enter a ticket ID, or pick one from your assigned tickets.
+4. Open the saved plan file (a clickable link, stored outside your repository), then approve it with the `/jira-dev-harness:approve` command it prints.
+5. Run `/jira-dev-harness:implement`, then `review`, `approve-review` and `ship` (each prints the next command). Merging is always a separate, manual `/jira-dev-harness:merge`.
 
 ## Usage
 
@@ -197,8 +228,8 @@ command first re-verifies:
 - the full SHA-256 and the signed approval, including its base commit
 
 **Each ticket gets its own sibling git worktree (Phase 8C).** For a main
-checkout at `React/jadwa`, ticket `JAD-101` is implemented in
-`React/jadwa-JAD-101` on branch `jira/JAD-101`, created from the approved
+checkout at `web/app`, ticket `PROJ-101` is implemented in
+`web/app-PROJ-101` on branch `jira/PROJ-101`, created from the approved
 base commit. Your main checkout is never changed. There is no central
 worktrees folder.
 
@@ -382,6 +413,21 @@ To check a plan from a terminal:
 ```bash
 node <plugin>/scripts/plan-store.cjs status <plugin-data-dir> <ISSUE-KEY>
 ```
+
+**Shareable review report (optional).** `review-save` also writes a
+sanitized, script-free share view (`review-<id>.share.html`): verdict,
+acceptance criteria, test cases grouped as Passed, Failed, Blocked, and Not
+Run, check results, findings, and the review SHA-256. It omits raw check
+logs (including quoted log lines), check commands, local paths, the
+repository location and remote, links, and credentials. After the review,
+Claude asks whether to publish it with Claude Code's `Artifact` tool; the
+guard allows only that exact file, only from the review session, and always
+shows a permission prompt. The returned claude.ai URL is recorded (signed)
+and linked automatically in the pull request description; no URL is ever
+invented. Artifacts start private; making one public is your choice on
+claude.ai and may require your organization to allow external sharing.
+Publishing needs a claude.ai login and an eligible plan; otherwise the local
+HTML report remains the record. The share view is never what you approve.
 
 ### 5. Approve the review: `/jira-dev-harness:approve-review`
 
@@ -1085,6 +1131,16 @@ Builds and tests use the project's own declared commands. Commit, push,
 and PR creation use Git and the hosting provider's tools behind approval
 gates. None of these have a dedicated agent.
 
+## What the plugin accesses and does
+
+- **Jira (your own account):** reads the tickets assigned to you, and the ticket you choose (fields, comments, attachments), through the Atlassian Rovo MCP server you connect. It writes to Jira only through `/jira-dev-harness:jira-sync`, which you start yourself.
+- **GitHub (your own account):** creates a branch push and pull request, and reads pull request status, only through your own GitHub MCP connection or `gh` login, only after you run `ship` or `merge`. It never merges automatically.
+- **Local operations:** runs Node scripts and git in your repository and in a sibling worktree for the ticket. Plans, approvals, reviews and audit records are stored in the plugin data directory, outside your repository. Hooks (`hooks/hooks.json`) check every file, shell and MCP action against the approved plan.
+- **Credentials:** the plugin never asks for, reads, stores or logs tokens or passwords. You sign in to Jira and GitHub yourself.
+- **Claude Artifact publishing (optional, consent-based):** after a review, Claude may offer to publish a sanitized, script-free copy of the review report to claude.ai with the `Artifact` tool. It happens only if you approve the permission prompt. The artifact starts private, contains no local paths, logs or credentials, and is never what you approve. Nothing else is uploaded.
+- **Jira writes:** outside a `jira-sync` session, any Atlassian write (comment, transition, edit, create) still needs your explicit permission prompt, and is refused when no prompt is possible (bypass or don't-ask mode). Reads are unaffected. If the guard itself fails, the call is blocked.
+- **No other network calls:** the plugin makes no calls of its own to any other service.
+
 ## Security notes
 
 - Jira is read and written only through your own authenticated Atlassian
@@ -1236,3 +1292,7 @@ What the plugin can and cannot guarantee:
   signature that needs a hardware key and the user's physical presence, or
   an approval given in a system the agent cannot act as. Phase 6 did not
   add one; see ROADMAP.
+
+## License
+
+[MIT](LICENSE)

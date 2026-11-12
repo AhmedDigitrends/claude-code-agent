@@ -2,7 +2,7 @@
 // on the verified ticket worktree. Review facts, recorded checks, review
 // records, the HTML report, and the approval all refer to the worktree; a
 // worktree review never falls back to the main checkout; legacy in-place
-// reviews keep working. Every repository lives under "React Apps/jadwa app".
+// reviews keep working. Every repository lives under "React Apps/demo app".
 // Run with: node --test
 
 "use strict";
@@ -16,7 +16,7 @@ const L = require("../scripts/lib/approval.cjs");
 const R = require("../scripts/lib/review.cjs");
 const { ROOT, SITE, KEY, git, makeFixture, draft, reviewJson, legacyImplement, guard, uuid } = require("./helpers.cjs");
 
-const REPO_DIR = path.join("React Apps", "jadwa app");
+const REPO_DIR = path.join("React Apps", "demo app");
 const slash = (p) => p.replace(/\\/g, "/");
 const PLAN = `# Plan ${KEY}\n\nReadiness: READY\n\n## Files likely to change\n- \`src/app.js\`\n\n## Testing and validation\n- \`node -v\`\n`;
 // Passes only where src/app.js exports 2: in the worktree, not in the main checkout.

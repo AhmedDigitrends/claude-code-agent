@@ -70,7 +70,7 @@ These hold for the whole run.
 Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/plan-store.cjs" ticket-ref <argument>`, quoting the argument exactly as typed in double quotes (omit it when the argument is empty). An unquoted URL containing `&` is refused by the guard. It never contacts Jira.
 
 - `TICKET-REF: site=<site> key=<KEY> project=<PROJ>`: the developer named a ticket. Use that site and key, and go to Step 2. A bare key takes the site from the repository's mapping file; if the site is `unknown`, call `getAccessibleAtlassianResources`. If exactly one site is accessible, use it and say so. If there are several, ask which one. Never guess.
-- `TICKET-REF: none given`: run **assigned-ticket discovery** below.
+- `TICKET-REF: none given`: first ask the developer: "Do you have a Jira ticket ID or URL? Paste it, or reply 'list' and I'll show the tickets assigned to you." Stop and wait. A ticket ID or URL goes through `ticket-ref` again. Only 'list' (or the same intent) runs **assigned-ticket discovery** below.
 - `ERROR: invalid ticket reference`: report the reason and stop. A ticket URL must be `https`, an `atlassian.net` host, and carry an issue key (`/browse/KEY-123` or `selectedIssue=KEY-123`). Do not contact any service.
 
 ### Assigned-ticket discovery (empty argument)
@@ -290,7 +290,7 @@ these steps.
 
 Show the developer:
 
-- The plan's readiness, revision, file path, and full SHA-256.
+- The plan's readiness, revision, file path, and full SHA-256. Show the path as a markdown link (for example `[plan-r1.md](<absolute path>)`) where the interface supports links, and say it can be opened in VS Code (click the link, or run `code "<path>"` in your own terminal). The file is stored outside the repository, in the plugin data directory.
 - A concise summary of each plan section. Show these in full:
   - Files likely to change
   - Proposed project-rule updates
