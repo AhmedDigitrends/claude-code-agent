@@ -232,6 +232,7 @@ function sanitize(value, local = []) {
   return s
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>)]+/gi, "[link removed]")
     .replace(/\b[\w.-]+@[\w.-]+:[\w.-]+\/[\w./-]+/g, "[link removed]")
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b/g, "[email removed]")
     .replace(/\\\\[^\s"'<>]+/g, "[path removed]")
     .replace(/\b[A-Za-z]:[\\/][^\s"'<>|]*/g, "[path removed]")
     .replace(/(^|[\s("'=:])\/(?:Users|home|tmp|var|mnt|opt|private|root|etc|srv|Volumes|[a-z])\/[^\s"'<>]*/g, "$1[path removed]");

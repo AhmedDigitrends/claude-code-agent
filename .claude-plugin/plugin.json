@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "license": "MIT",
   "icon": "icon.png",
+  "privacyPolicyUrl": "https://github.com/AhmedDigitrends/claude-code-agent/blob/main/PRIVACY.md",
   "description": "Project-independent harness that takes an assigned Jira Cloud ticket through analysis, planning, approved and attended implementation in the ticket's own sibling git worktree, independent review, review approval, and commit, push, and pull request creation, in any language or framework.",
   "author": {
     "name": "jira-dev-harness maintainers"

@@ -419,7 +419,9 @@ sanitized, script-free share view (`review-<id>.share.html`): verdict,
 acceptance criteria, test cases grouped as Passed, Failed, Blocked, and Not
 Run, check results, findings, and the review SHA-256. It omits raw check
 logs (including quoted log lines), check commands, local paths, the
-repository location and remote, links, and credentials. After the review,
+repository location and remote, links, email addresses (shown as
+`[email removed]`), and credentials. Personal names are not detected, so
+read the share view before you allow publishing. After the review,
 Claude asks whether to publish it with Claude Code's `Artifact` tool; the
 guard allows only that exact file, only from the review session, and always
 shows a permission prompt. The returned claude.ai URL is recorded (signed)
@@ -1137,9 +1139,56 @@ gates. None of these have a dedicated agent.
 - **GitHub (your own account):** creates a branch push and pull request, and reads pull request status, only through your own GitHub MCP connection or `gh` login, only after you run `ship` or `merge`. It never merges automatically.
 - **Local operations:** runs Node scripts and git in your repository and in a sibling worktree for the ticket. Plans, approvals, reviews and audit records are stored in the plugin data directory, outside your repository. Hooks (`hooks/hooks.json`) check every file, shell and MCP action against the approved plan.
 - **Credentials:** the plugin never asks for, reads, stores or logs tokens or passwords. You sign in to Jira and GitHub yourself.
-- **Claude Artifact publishing (optional, consent-based):** after a review, Claude may offer to publish a sanitized, script-free copy of the review report to claude.ai with the `Artifact` tool. It happens only if you approve the permission prompt. The artifact starts private, contains no local paths, logs or credentials, and is never what you approve. Nothing else is uploaded.
+- **Claude Artifact publishing (optional, consent-based):** after a review, Claude may offer to publish a sanitized, script-free copy of the review report to claude.ai with the `Artifact` tool. It happens only if you approve the permission prompt. The artifact starts private, contains no local paths, logs, links, email addresses or credentials, and is never what you approve. Free text from the ticket (for example a person's name) is not detected and would be uploaded. Nothing else is uploaded.
 - **Jira writes:** outside a `jira-sync` session, any Atlassian write (comment, transition, edit, create) still needs your explicit permission prompt, and is refused when no prompt is possible (bypass or don't-ask mode). Reads are unaffected. If the guard itself fails, the call is blocked.
-- **No other network calls:** the plugin makes no calls of its own to any other service.
+- **No other network calls:** the plugin makes no calls of its own to any other service. The one `curl` that a workflow session may run without a prompt downloads a single Jira attachment, from `api.media.atlassian.com` or from the Jira site named in the repository's committed mapping, into the plugin's temporary attachment directory. Any other host, a second URL, an upload, proxy or config option, or an output location outside that directory is refused by the guard.
+
+## Data handling and privacy
+
+The full policy is [PRIVACY.md](PRIVACY.md). In short, the plugin runs on your
+computer, has no server, telemetry or analytics, and sends nothing to its
+maintainers.
+
+**Stored locally, outside your repository, in the plugin data directory:**
+
+- **Account identifiers.** The Jira account (email or name) and GitHub login
+  you type into `/jira-dev-harness:connect --confirm` are saved in
+  `connect/<session>.json`.
+- **Jira and GitHub MCP responses.** During a `jira-sync` or `merge` session
+  the full read responses of your connections are saved as evidence records.
+  They can contain names, email addresses and comments written by other people.
+- **Ticket content and local paths.** Plans, reports, reviews, review bundles
+  (diff and check logs, with credential-shaped text masked), session state and
+  worktree records hold ticket text, repository identity and local paths,
+  which usually include your operating-system user name.
+- **Audit ledger.** `progress/<site>/<KEY>/ledger.jsonl` records the Jira
+  actions you authorized.
+- **Signing key.** The approval key is a random key generated on your machine.
+  It is not a credential for any service and is never transmitted.
+
+The plugin never stores or logs passwords, tokens or API keys.
+
+**Optional artifact sharing.** The sanitized share view of a review can be
+published to claude.ai (Anthropic) only after you approve the permission
+prompt. Credentials, paths, links and email addresses are masked; personal
+names in ticket text are not. The artifact starts private, and who can open it
+is your choice on claude.ai.
+
+### Retention and deletion
+
+The plugin keeps its records until you delete them. It never deletes them
+itself and has no automatic expiry.
+
+- To delete everything, remove the plugin data directory
+  `~/.claude/plugins/data/<plugin id>/`.
+- To delete one ticket, remove its folders under `plans/<site>/<KEY>/` and
+  `progress/<site>/<KEY>/`, and remove its worktree with
+  `/jira-dev-harness:worktree-remove`.
+- To delete a saved account confirmation, remove `connect/<session>.json`.
+- A published artifact is stored by Anthropic. Delete it from claude.ai; the
+  plugin has no command to unpublish it.
+- Pull request text and Jira comments that you authorized are stored by GitHub
+  and Atlassian.
 
 ## Security notes
 

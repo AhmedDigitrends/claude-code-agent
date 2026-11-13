@@ -71,6 +71,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const L = require("./lib/approval.cjs");
+const AU = require("./lib/attach-url.cjs");
 const P = require("./lib/provider.cjs");
 const M = require("./lib/merge.cjs");
 const JG = require("./lib/jira-gate.cjs");
@@ -357,12 +358,31 @@ const SAFE_SEGMENTS = [
   /^(Get-Content|Get-ChildItem|Test-Path|Select-String|Set-Location|Get-Location|Resolve-Path)(\s+.*)?$/i,
 ];
 
+// The Jira site of the repository's own mapping file (read only; this guard
+// also blocks edits to that file). Walks up from the hook's working
+// directory. Null when there is none, and then only the fixed attachment
+// hosts of lib/attach-url.cjs are allowed.
+let CURL_SITE = null;
+function configuredJiraSite(cwd) {
+  let dir = cwd ? path.resolve(String(cwd)) : null;
+  for (let i = 0; dir && i < 12; i += 1) {
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(dir, L.MAPPING_FILE), "utf8"));
+      return m && m.jira && typeof m.jira.site === "string" ? m.jira.site : null;
+    } catch { /* keep looking */ }
+    const up = path.dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return null;
+}
+
+// One attachment download: a single https URL on an allowed Jira attachment
+// host, an allowlisted set of curl options, and an output file inside the
+// attachment directory (see lib/attach-url.cjs).
 function curlAllowed(segment) {
   if (!/^curl(\.exe)?\s/.test(segment)) return false;
-  const urls = segment.match(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi) || [];
-  if (urls.length !== 1 || !/^['"]?https:\/\//i.test(urls[0].replace(/^['"]/, ""))) return false;
-  const out = /(?:^|\s)(?:-o|--output)\s+("[^"]+"|'[^']+'|\S+)/.exec(segment);
-  return !!out && inside(L.ATTACH_ROOT, out[1]) && !/\s(-O|--remote-name|-K|--config|-T|--upload-file|-d|--data\S*|-F|--form)\b/.test(segment);
+  return AU.curlProblem(segment, CURL_SITE, (p) => inside(L.ATTACH_ROOT, p)) === null;
 }
 
 function readOnlySegment(seg) {
@@ -570,6 +590,7 @@ process.stdin.on("end", () => {
     if (managed) deny(managed);
   }
 
+  CURL_SITE = configuredJiraSite(input.cwd);
   let state = null;
   try {
     state = workflowState(input);
